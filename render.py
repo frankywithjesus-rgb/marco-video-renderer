@@ -2,7 +2,7 @@ import json, os, subprocess, requests, tempfile, sys, traceback
 
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
-bot_token = os.environ['BOT_TOKEN']
+bot_token = os.environ.get('BOT_TOKEN', '')
 chat_id = os.environ.get('CHAT_ID', '8946671215') or '8946671215'
 
 bgs = [payload['bg1'], payload['bg2'], payload['bg3'], payload['bg4']]
@@ -12,7 +12,6 @@ texto2 = payload['texto2']
 texto3 = payload['texto3']
 texto4 = payload['texto4']
 duration = float(payload.get('duration', 60))
-seg = duration / 4
 
 workdir = tempfile.mkdtemp()
 FALLBACK = "https://videos.pexels.com/video-files/6945204/6945204-hd_1080_1920_30fps.mp4"
@@ -44,14 +43,27 @@ def download(url, path):
             f.write(chunk)
     return path
 
-def trim_resize(inp, out, dur):
+def get_audio_duration(path):
     r = subprocess.run([
-        'ffmpeg', '-y', '-i', inp, '-t', str(dur),
+        'ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', path
+    ], capture_output=True, text=True)
+    data = json.loads(r.stdout)
+    dur = float(data['format']['duration'])
+    print(f"Duracion del audio: {dur:.1f}s")
+    return dur
+
+def loop_video_to_duration(inp, out, dur):
+    """Hacer loop del video hasta alcanzar la duracion necesaria"""
+    result = subprocess.run([
+        'ffmpeg', '-y',
+        '-stream_loop', '-1',  # loop infinito
+        '-i', inp,
+        '-t', str(dur),
         '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out
     ], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise Exception(f"FFmpeg trim error: {r.stderr[-200:]}")
+    if result.returncode != 0:
+        raise Exception(f"FFmpeg loop error: {result.stderr[-200:]}")
 
 def esc(t):
     return t.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:").replace("%", "\\%")
@@ -64,6 +76,7 @@ try:
         videos.append(v)
 
     has_audio = bool(audio_url and len(audio_url) > 10)
+    audio_duration = duration  # fallback
     if has_audio:
         print("=== Descargando audio ===")
         r = requests.get(audio_url, timeout=120, stream=True)
@@ -72,10 +85,17 @@ try:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
         print(f"Audio: {os.path.getsize(audio)} bytes")
+        # Usar la duracion REAL del audio como duracion del video
+        audio_duration = get_audio_duration(audio)
+        duration = audio_duration
 
-    print("=== Recortando clips ===")
+    seg = duration / 4
+    print(f"Duracion total del video: {duration:.1f}s ({duration/60:.1f} min)")
+
+    # Hacer loop de cada clip para que dure exactamente seg segundos (sin congelarse)
+    print("=== Procesando clips con loop ===")
     for i, v in enumerate(videos):
-        trim_resize(v, f"{workdir}/c{i+1}.mp4", seg)
+        loop_video_to_duration(v, f"{workdir}/c{i+1}.mp4", seg)
 
     print("=== Concatenando ===")
     with open(f"{workdir}/list.txt", 'w') as f:
@@ -86,26 +106,28 @@ try:
         '-i', f"{workdir}/list.txt", '-c', 'copy', f"{workdir}/base.mp4"
     ], check=True, capture_output=True)
 
-    print("=== Renderizando con subtitulos ===")
-    t = [1, seg+1, seg*2+1, seg*3+1]
-    e = [seg-1, seg*2-1, seg*3-1, duration-1]
+    # Subtitulos: distribuir los 4 textos en cuartos de la duracion real
+    print("=== Renderizando con subtitulos y audio completo ===")
+    t = [0, seg, seg*2, seg*3]
+    e = [seg, seg*2, seg*3, duration]
     txts = [texto1, texto2, texto3, texto4]
     vf_parts = ["colorchannelmixer=rr=0.4:gg=0.4:bb=0.4"]
     for i in range(4):
         vf_parts.append(
-            f"drawtext=text='{esc(txts[i])}':fontsize=56:fontcolor=white"
-            f":x=(w-text_w)/2:y=(h-text_h)/2"
+            f"drawtext=text='{esc(txts[i])}':fontsize=52:fontcolor=white"
+            f":x=(w-text_w)/2:y=h*0.85"
             f":enable='between(t,{t[i]},{e[i]})'"
-            f":box=1:boxcolor=black@0.3:boxborderw=10"
+            f":box=1:boxcolor=black@0.5:boxborderw=12"
         )
     vf = ",".join(vf_parts)
 
     cmd = ['ffmpeg', '-y', '-i', f"{workdir}/base.mp4"]
     if has_audio:
         cmd += ['-i', audio]
-    cmd += ['-vf', vf, '-t', str(duration), '-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
+    cmd += ['-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
     if has_audio:
-        cmd += ['-c:a', 'aac', '-b:a', '128k', '-shortest']
+        # NO poner -t, dejar que el audio defina la duracion
+        cmd += ['-c:a', 'aac', '-b:a', '128k', '-map', '0:v', '-map', '1:a', '-shortest']
     cmd.append(f"{workdir}/final.mp4")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -114,7 +136,6 @@ try:
     final_size = os.path.getsize(f"{workdir}/final.mp4")
     print(f"=== Video final: {final_size} bytes ===")
 
-    # Enviar directo a Telegram (soporta hasta 50MB)
     print("=== Enviando a Telegram ===")
     with open(f"{workdir}/final.mp4", 'rb') as f:
         r = requests.post(
@@ -123,14 +144,11 @@ try:
             files={"video": ("video.mp4", f, "video/mp4")},
             timeout=300
         )
-    print(f"Telegram status: {r.status_code}")
-    result = r.json()
-    print(f"Telegram ok: {result.get('ok')}")
-    
-    if not result.get('ok'):
-        raise Exception(f"Telegram error: {result}")
+    result_tg = r.json()
+    print(f"Telegram ok: {result_tg.get('ok')}")
+    if not result_tg.get('ok'):
+        raise Exception(f"Telegram error: {result_tg}")
 
-    # Notificar a n8n que terminó
     requests.post(callback_url, json={'status': 'done', 'video_url': 'sent_via_telegram'}, timeout=30)
     print("=== COMPLETADO ===")
 
