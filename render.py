@@ -136,10 +136,10 @@ try:
     cmd = ['ffmpeg', '-y', '-i', f"{workdir}/base.mp4"]
     if has_audio:
         cmd += ['-i', audio]
-    cmd += ['-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
+    cmd += ['-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28']
     if has_audio:
         # NO poner -t, dejar que el audio defina la duracion
-        cmd += ['-c:a', 'aac', '-b:a', '128k', '-map', '0:v', '-map', '1:a', '-shortest']
+        cmd += ['-c:a', 'aac', '-b:a', '96k', '-map', '0:v', '-map', '1:a', '-shortest']
     cmd.append(f"{workdir}/final.mp4")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
