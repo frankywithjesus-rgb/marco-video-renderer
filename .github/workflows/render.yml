@@ -1,0 +1,29 @@
+name: Render Video Marco
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: 'JSON payload'
+        required: true
+        type: string
+      callback_url:
+        description: 'Webhook URL n8n'
+        required: true
+        type: string
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get install -y ffmpeg
+          pip3 install requests
+      - name: Renderizar
+        env:
+          PAYLOAD: ${{ github.event.inputs.payload }}
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+        run: python3 render.py
