@@ -3,7 +3,7 @@ import json, os, subprocess, requests, tempfile, sys, traceback
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
 bot_token = os.environ['BOT_TOKEN']
-chat_id = os.environ['CHAT_ID']
+chat_id = os.environ.get('CHAT_ID', '8946671215') or '8946671215'
 
 bgs = [payload['bg1'], payload['bg2'], payload['bg3'], payload['bg4']]
 audio_url = payload.get('audioUrl', '')
