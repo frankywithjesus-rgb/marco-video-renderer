@@ -17,33 +17,48 @@ seg = duration / 4
 
 workdir = tempfile.mkdtemp()
 
-def download(url, path):
-    r = requests.get(url, timeout=120, stream=True)
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.pexels.com/",
+    "Accept": "*/*"
+}
+
+def download(url, path, use_browser_headers=False):
+    h = BROWSER_HEADERS if use_browser_headers else {}
+    r = requests.get(url, timeout=120, stream=True, headers=h)
+    r.raise_for_status()
     with open(path, 'wb') as f:
         for chunk in r.iter_content(8192):
             f.write(chunk)
+    size = os.path.getsize(path)
+    print(f"  Descargado {path}: {size} bytes")
+    if size < 1000:
+        raise Exception(f"Archivo demasiado pequeno ({size} bytes) - posible bloqueo")
     return path
 
 def esc(t):
     return t.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:").replace("%", "\\%")
 
 print("Descargando videos de Pexels...")
-v1 = download(bg1, f"{workdir}/v1.mp4")
-v2 = download(bg2, f"{workdir}/v2.mp4")
-v3 = download(bg3, f"{workdir}/v3.mp4")
-v4 = download(bg4, f"{workdir}/v4.mp4")
+v1 = download(bg1, f"{workdir}/v1.mp4", use_browser_headers=True)
+v2 = download(bg2, f"{workdir}/v2.mp4", use_browser_headers=True)
+v3 = download(bg3, f"{workdir}/v3.mp4", use_browser_headers=True)
+v4 = download(bg4, f"{workdir}/v4.mp4", use_browser_headers=True)
 
-has_audio = bool(audio_url)
+has_audio = bool(audio_url and len(audio_url) > 10)
 if has_audio:
-    print("Descargando audio...")
+    print("Descargando audio de Drive...")
     audio = download(audio_url, f"{workdir}/audio.mp3")
 
 def trim_resize(inp, out, dur):
-    subprocess.run([
+    result = subprocess.run([
         'ffmpeg', '-y', '-i', inp, '-t', str(dur),
         '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out
-    ], check=True, capture_output=True)
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"FFmpeg error: {result.stderr[-300:]}")
+        raise Exception("FFmpeg trim fallo")
 
 print("Recortando y redimensionando clips...")
 trim_resize(v1, f"{workdir}/c1.mp4", seg)
@@ -82,13 +97,19 @@ cmd += ['-vf', vf, '-t', str(duration), '-c:v', 'libx264', '-preset', 'fast', '-
 if has_audio:
     cmd += ['-c:a', 'aac', '-b:a', '128k', '-shortest']
 cmd.append(f"{workdir}/final.mp4")
-subprocess.run(cmd, check=True)
+result = subprocess.run(cmd, capture_output=True, text=True)
+if result.returncode != 0:
+    print(f"FFmpeg render error: {result.stderr[-500:]}")
+    raise Exception("FFmpeg render fallo")
 
 print("Subiendo a file.io...")
 with open(f"{workdir}/final.mp4", 'rb') as f:
     r = requests.post('https://file.io/?expires=1d', files={'file': f}, timeout=120)
 video_url = r.json().get('link', '')
 print(f"URL del video: {video_url}")
+
+if not video_url:
+    raise Exception("No se pudo subir el video a file.io")
 
 print("Notificando a n8n...")
 requests.post(callback_url, json={'video_url': video_url, 'status': 'done'}, timeout=30)
