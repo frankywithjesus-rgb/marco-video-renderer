@@ -2,6 +2,8 @@ import json, os, subprocess, requests, tempfile, sys, traceback
 
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
+bot_token = os.environ['BOT_TOKEN']
+chat_id = os.environ['CHAT_ID']
 
 bgs = [payload['bg1'], payload['bg2'], payload['bg3'], payload['bg4']]
 audio_url = payload.get('audioUrl', '')
@@ -54,45 +56,6 @@ def trim_resize(inp, out, dur):
 def esc(t):
     return t.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:").replace("%", "\\%")
 
-def upload_video(path):
-    # Intentar con litterbox.catbox.moe (1 hora, sin limite de tamaño)
-    try:
-        with open(path, 'rb') as f:
-            r = requests.post(
-                'https://litterbox.catbox.moe/resources/internals/api.php',
-                data={'reqtype': 'fileupload', 'time': '1h'},
-                files={'fileToUpload': ('video.mp4', f, 'video/mp4')},
-                timeout=120
-            )
-        print(f"Litterbox status: {r.status_code}, response: {r.text[:100]}")
-        if r.status_code == 200 and r.text.startswith('http'):
-            return r.text.strip()
-    except Exception as e:
-        print(f"Litterbox error: {e}")
-
-    # Fallback: file.io con manejo de error
-    try:
-        with open(path, 'rb') as f:
-            r = requests.post('https://file.io/?expires=1d', files={'file': ('video.mp4', f, 'video/mp4')}, timeout=120)
-        print(f"file.io status: {r.status_code}, response: {r.text[:200]}")
-        if r.status_code == 200:
-            data = r.json()
-            return data.get('link', '')
-    except Exception as e:
-        print(f"file.io error: {e}")
-
-    # Fallback: 0x0.st
-    try:
-        with open(path, 'rb') as f:
-            r = requests.post('https://0x0.st', files={'file': ('video.mp4', f, 'video/mp4')}, timeout=120)
-        print(f"0x0.st status: {r.status_code}, response: {r.text[:100]}")
-        if r.status_code == 200:
-            return r.text.strip()
-    except Exception as e:
-        print(f"0x0.st error: {e}")
-
-    return ''
-
 try:
     print("=== Descargando videos ===")
     videos = []
@@ -108,6 +71,7 @@ try:
         with open(audio, 'wb') as f:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
+        print(f"Audio: {os.path.getsize(audio)} bytes")
 
     print("=== Recortando clips ===")
     for i, v in enumerate(videos):
@@ -150,14 +114,24 @@ try:
     final_size = os.path.getsize(f"{workdir}/final.mp4")
     print(f"=== Video final: {final_size} bytes ===")
 
-    print("=== Subiendo video ===")
-    video_url = upload_video(f"{workdir}/final.mp4")
-    print(f"URL: {video_url}")
-    if not video_url:
-        raise Exception("Todos los servicios de upload fallaron")
+    # Enviar directo a Telegram (soporta hasta 50MB)
+    print("=== Enviando a Telegram ===")
+    with open(f"{workdir}/final.mp4", 'rb') as f:
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendVideo",
+            data={"chat_id": chat_id, "caption": "🎬 Video listo! ¿Lo aprobamos para publicar?"},
+            files={"video": ("video.mp4", f, "video/mp4")},
+            timeout=300
+        )
+    print(f"Telegram status: {r.status_code}")
+    result = r.json()
+    print(f"Telegram ok: {result.get('ok')}")
+    
+    if not result.get('ok'):
+        raise Exception(f"Telegram error: {result}")
 
-    print("=== Notificando a n8n ===")
-    requests.post(callback_url, json={'video_url': video_url, 'status': 'done'}, timeout=30)
+    # Notificar a n8n que terminó
+    requests.post(callback_url, json={'status': 'done', 'video_url': 'sent_via_telegram'}, timeout=30)
     print("=== COMPLETADO ===")
 
 except Exception as e:
