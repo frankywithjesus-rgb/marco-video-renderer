@@ -3,10 +3,7 @@ import json, os, subprocess, requests, tempfile, sys, traceback
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
 
-bg1 = payload['bg1']
-bg2 = payload['bg2']
-bg3 = payload['bg3']
-bg4 = payload['bg4']
+bgs = [payload['bg1'], payload['bg2'], payload['bg3'], payload['bg4']]
 audio_url = payload.get('audioUrl', '')
 texto1 = payload['texto1']
 texto2 = payload['texto2']
@@ -17,23 +14,34 @@ seg = duration / 4
 
 workdir = tempfile.mkdtemp()
 
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://www.pexels.com/",
-    "Accept": "*/*"
-}
+FALLBACK = "https://videos.pexels.com/video-files/6945204/6945204-hd_1080_1920_30fps.mp4"
 
-def download(url, path, browser=False):
-    h = BROWSER_HEADERS if browser else {}
-    r = requests.get(url, timeout=120, stream=True, headers=h)
-    r.raise_for_status()
+HEADERS = [
+    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.pexels.com/", "Accept": "*/*"},
+    {"User-Agent": "python-requests/2.31.0"},
+    {}
+]
+
+def download(url, path):
+    for h in HEADERS:
+        try:
+            r = requests.get(url, timeout=120, stream=True, headers=h)
+            if r.status_code == 200:
+                with open(path, 'wb') as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+                size = os.path.getsize(path)
+                if size > 10000:
+                    print(f"OK {path}: {size} bytes")
+                    return path
+        except Exception as e:
+            print(f"  Intento fallido: {e}")
+    # Usar fallback
+    print(f"Usando fallback para {path}")
+    r = requests.get(FALLBACK, timeout=120, stream=True, headers=HEADERS[0])
     with open(path, 'wb') as f:
         for chunk in r.iter_content(8192):
             f.write(chunk)
-    size = os.path.getsize(path)
-    print(f"Descargado {path}: {size} bytes")
-    if size < 1000:
-        raise Exception(f"Archivo muy pequeño: {size} bytes")
     return path
 
 def trim_resize(inp, out, dur):
@@ -43,28 +51,31 @@ def trim_resize(inp, out, dur):
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out
     ], capture_output=True, text=True)
     if r.returncode != 0:
-        raise Exception(f"FFmpeg trim error: {r.stderr[-300:]}")
+        raise Exception(f"FFmpeg trim error: {r.stderr[-200:]}")
 
 def esc(t):
     return t.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:").replace("%", "\\%")
 
 try:
     print("=== Descargando videos ===")
-    v1 = download(bg1, f"{workdir}/v1.mp4", browser=True)
-    v2 = download(bg2, f"{workdir}/v2.mp4", browser=True)
-    v3 = download(bg3, f"{workdir}/v3.mp4", browser=True)
-    v4 = download(bg4, f"{workdir}/v4.mp4", browser=True)
+    videos = []
+    for i, url in enumerate(bgs):
+        v = download(url, f"{workdir}/v{i+1}.mp4")
+        videos.append(v)
 
     has_audio = bool(audio_url and len(audio_url) > 10)
     if has_audio:
         print("=== Descargando audio ===")
-        audio = download(audio_url, f"{workdir}/audio.mp3")
+        r = requests.get(audio_url, timeout=120, stream=True)
+        audio = f"{workdir}/audio.mp3"
+        with open(audio, 'wb') as f:
+            for chunk in r.iter_content(8192):
+                f.write(chunk)
+        print(f"Audio: {os.path.getsize(audio)} bytes")
 
     print("=== Recortando clips ===")
-    trim_resize(v1, f"{workdir}/c1.mp4", seg)
-    trim_resize(v2, f"{workdir}/c2.mp4", seg)
-    trim_resize(v3, f"{workdir}/c3.mp4", seg)
-    trim_resize(v4, f"{workdir}/c4.mp4", seg)
+    for i, v in enumerate(videos):
+        trim_resize(v, f"{workdir}/c{i+1}.mp4", seg)
 
     print("=== Concatenando ===")
     with open(f"{workdir}/list.txt", 'w') as f:
@@ -118,6 +129,6 @@ try:
 
 except Exception as e:
     tb = traceback.format_exc()
-    print(f"ERROR: {tb}")
+    print(f"ERROR:\n{tb}")
     requests.post(callback_url, json={'video_url': '', 'status': 'error', 'message': str(e)}, timeout=15)
     sys.exit(1)
