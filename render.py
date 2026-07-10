@@ -13,17 +13,16 @@ duration = float(payload.get('duration', 60))
 seg = duration / 4
 
 workdir = tempfile.mkdtemp()
-
 FALLBACK = "https://videos.pexels.com/video-files/6945204/6945204-hd_1080_1920_30fps.mp4"
 
-HEADERS = [
-    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://www.pexels.com/", "Accept": "*/*"},
-    {"User-Agent": "python-requests/2.31.0"},
-    {}
-]
+PEXELS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://www.pexels.com/",
+    "Accept": "*/*"
+}
 
 def download(url, path):
-    for h in HEADERS:
+    for h in [PEXELS_HEADERS, {}]:
         try:
             r = requests.get(url, timeout=120, stream=True, headers=h)
             if r.status_code == 200:
@@ -36,9 +35,8 @@ def download(url, path):
                     return path
         except Exception as e:
             print(f"  Intento fallido: {e}")
-    # Usar fallback
     print(f"Usando fallback para {path}")
-    r = requests.get(FALLBACK, timeout=120, stream=True, headers=HEADERS[0])
+    r = requests.get(FALLBACK, timeout=120, stream=True, headers=PEXELS_HEADERS)
     with open(path, 'wb') as f:
         for chunk in r.iter_content(8192):
             f.write(chunk)
@@ -56,6 +54,45 @@ def trim_resize(inp, out, dur):
 def esc(t):
     return t.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:").replace("%", "\\%")
 
+def upload_video(path):
+    # Intentar con litterbox.catbox.moe (1 hora, sin limite de tamaño)
+    try:
+        with open(path, 'rb') as f:
+            r = requests.post(
+                'https://litterbox.catbox.moe/resources/internals/api.php',
+                data={'reqtype': 'fileupload', 'time': '1h'},
+                files={'fileToUpload': ('video.mp4', f, 'video/mp4')},
+                timeout=120
+            )
+        print(f"Litterbox status: {r.status_code}, response: {r.text[:100]}")
+        if r.status_code == 200 and r.text.startswith('http'):
+            return r.text.strip()
+    except Exception as e:
+        print(f"Litterbox error: {e}")
+
+    # Fallback: file.io con manejo de error
+    try:
+        with open(path, 'rb') as f:
+            r = requests.post('https://file.io/?expires=1d', files={'file': ('video.mp4', f, 'video/mp4')}, timeout=120)
+        print(f"file.io status: {r.status_code}, response: {r.text[:200]}")
+        if r.status_code == 200:
+            data = r.json()
+            return data.get('link', '')
+    except Exception as e:
+        print(f"file.io error: {e}")
+
+    # Fallback: 0x0.st
+    try:
+        with open(path, 'rb') as f:
+            r = requests.post('https://0x0.st', files={'file': ('video.mp4', f, 'video/mp4')}, timeout=120)
+        print(f"0x0.st status: {r.status_code}, response: {r.text[:100]}")
+        if r.status_code == 200:
+            return r.text.strip()
+    except Exception as e:
+        print(f"0x0.st error: {e}")
+
+    return ''
+
 try:
     print("=== Descargando videos ===")
     videos = []
@@ -71,7 +108,6 @@ try:
         with open(audio, 'wb') as f:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
-        print(f"Audio: {os.path.getsize(audio)} bytes")
 
     print("=== Recortando clips ===")
     for i, v in enumerate(videos):
@@ -114,14 +150,11 @@ try:
     final_size = os.path.getsize(f"{workdir}/final.mp4")
     print(f"=== Video final: {final_size} bytes ===")
 
-    print("=== Subiendo a file.io ===")
-    with open(f"{workdir}/final.mp4", 'rb') as f:
-        r = requests.post('https://file.io/?expires=1d', files={'file': f}, timeout=120)
-    data = r.json()
-    video_url = data.get('link', '')
+    print("=== Subiendo video ===")
+    video_url = upload_video(f"{workdir}/final.mp4")
     print(f"URL: {video_url}")
     if not video_url:
-        raise Exception(f"Upload fallo: {data}")
+        raise Exception("Todos los servicios de upload fallaron")
 
     print("=== Notificando a n8n ===")
     requests.post(callback_url, json={'video_url': video_url, 'status': 'done'}, timeout=30)
