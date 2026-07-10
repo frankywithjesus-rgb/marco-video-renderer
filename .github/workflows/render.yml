@@ -26,4 +26,6 @@ jobs:
         env:
           PAYLOAD: ${{ github.event.inputs.payload }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python3 render.py
