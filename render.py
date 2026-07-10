@@ -111,15 +111,27 @@ try:
     t = [0, seg, seg*2, seg*3]
     e = [seg, seg*2, seg*3, duration]
     txts = [texto1, texto2, texto3, texto4]
-    vf_parts = ["colorchannelmixer=rr=0.4:gg=0.4:bb=0.4"]
-    for i in range(4):
-        vf_parts.append(
-            f"drawtext=text='{esc(txts[i])}':fontsize=52:fontcolor=white"
-            f":x=(w-text_w)/2:y=h*0.85"
-            f":enable='between(t,{t[i]},{e[i]})'"
-            f":box=1:boxcolor=black@0.5:boxborderw=12"
-        )
-    vf = ",".join(vf_parts)
+    # Generar subtítulos como archivo SRT para soporte de múltiples líneas
+    srt_path = f"{workdir}/subs.srt"
+    def format_time(secs):
+        h = int(secs // 3600)
+        m = int((secs % 3600) // 60)
+        s = int(secs % 60)
+        ms = int((secs % 1) * 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    with open(srt_path, 'w', encoding='utf-8') as srt:
+        for i in range(4):
+            srt.write(f"{i+1}\n")
+            srt.write(f"{format_time(t[i])} --> {format_time(e[i])}\n")
+            srt.write(f"{txts[i]}\n\n")
+
+    vf = (
+        "colorchannelmixer=rr=0.4:gg=0.4:bb=0.4,"
+        f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=22,"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
+        "Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=60'"
+    )
 
     cmd = ['ffmpeg', '-y', '-i', f"{workdir}/base.mp4"]
     if has_audio:
