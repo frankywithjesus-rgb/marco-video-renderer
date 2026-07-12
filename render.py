@@ -1,9 +1,10 @@
-import json, os, subprocess, requests, tempfile, sys, traceback, base64
+import json, os, subprocess, requests, tempfile, sys, traceback, base64, time
 
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
 bot_token = os.environ.get('BOT_TOKEN', '')
 chat_id = os.environ.get('CHAT_ID', '8946671215') or '8946671215'
+github_token = os.environ.get('GITHUB_TOKEN', '')
 
 bgs = [payload['bg1'], payload['bg2'], payload['bg3'], payload['bg4']]
 audio_url = payload.get('audioUrl', '')
@@ -16,6 +17,8 @@ titulo = payload.get('titulo', 'Historia viral - MarcoPeru')
 
 workdir = tempfile.mkdtemp()
 FALLBACK = "https://videos.pexels.com/video-files/6945204/6945204-hd_1080_1920_30fps.mp4"
+RELEASE_ID = "352830454"
+REPO = "frankywithjesus-rgb/marco-video-renderer"
 
 PEXELS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -65,21 +68,35 @@ def loop_video_to_duration(inp, out, dur):
     if result.returncode != 0:
         raise Exception(f"FFmpeg loop error: {result.stderr[-200:]}")
 
-def upload_to_fileio(path):
-    """Sube el video a file.io y retorna URL publica temporal (expira en 1 hora)"""
-    print("=== Subiendo video a file.io ===")
-    with open(path, 'rb') as f:
-        r = requests.post(
-            'https://file.io/?expires=1h',
-            files={'file': ('video.mp4', f, 'video/mp4')},
-            timeout=300
+def upload_to_github_release(path, token):
+    """Sube video a GitHub Release y retorna URL publica de descarga"""
+    print("=== Subiendo video a GitHub Release ===")
+    headers = {
+        "Authorization": f"token {token}",
+        "Content-Type": "video/mp4"
+    }
+    # Borrar asset anterior si existe (para no acumular)
+    assets = requests.get(
+        f"https://api.github.com/repos/{REPO}/releases/{RELEASE_ID}/assets",
+        headers={"Authorization": f"token {token}"}
+    ).json()
+    for asset in assets:
+        requests.delete(
+            f"https://api.github.com/repos/{REPO}/releases/assets/{asset['id']}",
+            headers={"Authorization": f"token {token}"}
         )
+        print(f"  Borrado asset anterior: {asset['name']}")
+
+    filename = f"video_{int(time.time())}.mp4"
+    upload_url = f"https://uploads.github.com/repos/{REPO}/releases/{RELEASE_ID}/assets?name={filename}"
+    with open(path, 'rb') as f:
+        r = requests.post(upload_url, headers=headers, data=f, timeout=300)
     data = r.json()
-    if data.get('success'):
-        url = data['link']
+    if r.status_code in (200, 201) and 'browser_download_url' in data:
+        url = data['browser_download_url']
         print(f"URL publica: {url}")
         return url
-    raise Exception(f"file.io error: {data}")
+    raise Exception(f"GitHub Release upload error: {r.status_code} {data}")
 
 try:
     print("=== Descargando videos ===")
@@ -158,8 +175,8 @@ try:
     final_size = os.path.getsize(final_path)
     print(f"=== Video final: {final_size} bytes ===")
 
-    # 1. Subir a file.io para obtener URL publica
-    video_url = upload_to_fileio(final_path)
+    # 1. Subir a GitHub Release
+    video_url = upload_to_github_release(final_path, github_token)
 
     # 2. Enviar a Telegram
     print("=== Enviando a Telegram ===")
@@ -175,7 +192,7 @@ try:
     if not result_tg.get('ok'):
         print(f"Telegram warning: {result_tg}")
 
-    # 3. Callback a n8n con URL real y titulo
+    # 3. Callback a n8n
     requests.post(callback_url, json={
         'status': 'done',
         'video_url': video_url,
