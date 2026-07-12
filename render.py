@@ -44,34 +44,11 @@ def download(url, path):
             f.write(chunk)
     return path
 
-def download_audio(url, path):
-    """Descarga audio con seguimiento de redirecciones (necesario para Google Drive)"""
-    session = requests.Session()
-    session.max_redirects = 10
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "*/*"
-    }
-    r = session.get(url, timeout=180, stream=True, headers=headers, allow_redirects=True)
-    r.raise_for_status()
-    with open(path, 'wb') as f:
-        for chunk in r.iter_content(8192):
-            if chunk:
-                f.write(chunk)
-    size = os.path.getsize(path)
-    print(f"Audio descargado: {size} bytes")
-    if size < 1000:
-        raise Exception(f"Audio demasiado pequeño ({size} bytes) - probable error de descarga")
-    return path
-
 def get_audio_duration(path):
     r = subprocess.run([
         'ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', path
     ], capture_output=True, text=True)
-    stdout = r.stdout.strip()
-    if not stdout:
-        raise Exception(f"ffprobe no retornó datos para {path}. stderr: {r.stderr[:200]}")
-    data = json.loads(stdout)
+    data = json.loads(r.stdout)
     dur = float(data['format']['duration'])
     print(f"Duracion del audio: {dur:.1f}s")
     return dur
@@ -97,10 +74,6 @@ def upload_to_fileio(path):
             files={'file': ('video.mp4', f, 'video/mp4')},
             timeout=300
         )
-    raw = r.text
-    print(f"file.io response: {raw[:200]}")
-    if not raw.strip():
-        raise Exception("file.io devolvio respuesta vacia")
     data = r.json()
     if data.get('success'):
         url = data['link']
@@ -118,9 +91,13 @@ try:
     has_audio = bool(audio_url and len(audio_url) > 10)
     audio_duration = duration
     if has_audio:
-        print(f"=== Descargando audio: {audio_url[:80]} ===")
+        print("=== Descargando audio ===")
+        r = requests.get(audio_url, timeout=120, stream=True)
         audio = f"{workdir}/audio.mp3"
-        download_audio(audio_url, audio)
+        with open(audio, 'wb') as f:
+            for chunk in r.iter_content(8192):
+                f.write(chunk)
+        print(f"Audio: {os.path.getsize(audio)} bytes")
         audio_duration = get_audio_duration(audio)
         duration = audio_duration
 
@@ -184,26 +161,19 @@ try:
     # 1. Subir a file.io para obtener URL publica
     video_url = upload_to_fileio(final_path)
 
-    # 2. Enviar a Telegram (solo si hay bot_token)
-    if bot_token:
-        print("=== Enviando a Telegram ===")
-        with open(final_path, 'rb') as f:
-            r = requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendVideo",
-                data={"chat_id": chat_id, "caption": "🎬 Video listo! Publicando en YouTube y Facebook..."},
-                files={"video": ("video.mp4", f, "video/mp4")},
-                timeout=300
-            )
-        raw = r.text
-        if not raw.strip():
-            print("Telegram: respuesta vacia, ignorando")
-        else:
-            result_tg = r.json()
-            print(f"Telegram ok: {result_tg.get('ok')}")
-            if not result_tg.get('ok'):
-                print(f"Telegram warning: {result_tg}")
-    else:
-        print("BOT_TOKEN no configurado, saltando Telegram directo (n8n lo maneja)")
+    # 2. Enviar a Telegram
+    print("=== Enviando a Telegram ===")
+    with open(final_path, 'rb') as f:
+        r = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendVideo",
+            data={"chat_id": chat_id, "caption": "🎬 Video listo! Publicando en YouTube y Facebook..."},
+            files={"video": ("video.mp4", f, "video/mp4")},
+            timeout=300
+        )
+    result_tg = r.json()
+    print(f"Telegram ok: {result_tg.get('ok')}")
+    if not result_tg.get('ok'):
+        print(f"Telegram warning: {result_tg}")
 
     # 3. Callback a n8n con URL real y titulo
     requests.post(callback_url, json={
