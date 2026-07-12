@@ -4,7 +4,7 @@ payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
 bot_token = os.environ.get('BOT_TOKEN', '')
 chat_id = os.environ.get('CHAT_ID', '8946671215') or '8946671215'
-github_token = os.environ.get('GITHUB_TOKEN', '')
+github_token = os.environ.get('GH_TOKEN', '')
 
 bgs = [payload['bg1'], payload['bg2'], payload['bg3'], payload['bg4']]
 audio_url = payload.get('audioUrl', '')
