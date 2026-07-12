@@ -28,4 +28,6 @@ jobs:
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 render.py
+
