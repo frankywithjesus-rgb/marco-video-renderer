@@ -16,6 +16,8 @@ jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Instalar dependencias
@@ -28,6 +30,7 @@ jobs:
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: "352830454"
+          REPO: "frankywithjesus-rgb/marco-video-renderer"
         run: python3 render.py
-
