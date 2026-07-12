@@ -1,4 +1,4 @@
-import json, os, subprocess, requests, tempfile, sys, traceback
+import json, os, subprocess, requests, tempfile, sys, traceback, base64
 
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
@@ -12,6 +12,7 @@ texto2 = payload['texto2']
 texto3 = payload['texto3']
 texto4 = payload['texto4']
 duration = float(payload.get('duration', 60))
+titulo = payload.get('titulo', 'Historia viral - MarcoPeru')
 
 workdir = tempfile.mkdtemp()
 FALLBACK = "https://videos.pexels.com/video-files/6945204/6945204-hd_1080_1920_30fps.mp4"
@@ -53,10 +54,9 @@ def get_audio_duration(path):
     return dur
 
 def loop_video_to_duration(inp, out, dur):
-    """Hacer loop del video hasta alcanzar la duracion necesaria"""
     result = subprocess.run([
         'ffmpeg', '-y',
-        '-stream_loop', '-1',  # loop infinito
+        '-stream_loop', '-1',
         '-i', inp,
         '-t', str(dur),
         '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
@@ -65,8 +65,21 @@ def loop_video_to_duration(inp, out, dur):
     if result.returncode != 0:
         raise Exception(f"FFmpeg loop error: {result.stderr[-200:]}")
 
-def esc(t):
-    return t.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:").replace("%", "\\%")
+def upload_to_fileio(path):
+    """Sube el video a file.io y retorna URL publica temporal (expira en 1 hora)"""
+    print("=== Subiendo video a file.io ===")
+    with open(path, 'rb') as f:
+        r = requests.post(
+            'https://file.io/?expires=1h',
+            files={'file': ('video.mp4', f, 'video/mp4')},
+            timeout=300
+        )
+    data = r.json()
+    if data.get('success'):
+        url = data['link']
+        print(f"URL publica: {url}")
+        return url
+    raise Exception(f"file.io error: {data}")
 
 try:
     print("=== Descargando videos ===")
@@ -76,7 +89,7 @@ try:
         videos.append(v)
 
     has_audio = bool(audio_url and len(audio_url) > 10)
-    audio_duration = duration  # fallback
+    audio_duration = duration
     if has_audio:
         print("=== Descargando audio ===")
         r = requests.get(audio_url, timeout=120, stream=True)
@@ -85,14 +98,12 @@ try:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
         print(f"Audio: {os.path.getsize(audio)} bytes")
-        # Usar la duracion REAL del audio como duracion del video
         audio_duration = get_audio_duration(audio)
         duration = audio_duration
 
     seg = duration / 4
     print(f"Duracion total del video: {duration:.1f}s ({duration/60:.1f} min)")
 
-    # Hacer loop de cada clip para que dure exactamente seg segundos (sin congelarse)
     print("=== Procesando clips con loop ===")
     for i, v in enumerate(videos):
         loop_video_to_duration(v, f"{workdir}/c{i+1}.mp4", seg)
@@ -106,13 +117,12 @@ try:
         '-i', f"{workdir}/list.txt", '-c', 'copy', f"{workdir}/base.mp4"
     ], check=True, capture_output=True)
 
-    # Subtitulos: distribuir los 4 textos en cuartos de la duracion real
     print("=== Renderizando con subtitulos y audio completo ===")
     t = [0, seg, seg*2, seg*3]
     e = [seg, seg*2, seg*3, duration]
     txts = [texto1, texto2, texto3, texto4]
-    # Generar subtítulos como archivo SRT para soporte de múltiples líneas
     srt_path = f"{workdir}/subs.srt"
+
     def format_time(secs):
         h = int(secs // 3600)
         m = int((secs % 3600) // 60)
@@ -138,30 +148,39 @@ try:
         cmd += ['-i', audio]
     cmd += ['-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28']
     if has_audio:
-        # NO poner -t, dejar que el audio defina la duracion
         cmd += ['-c:a', 'aac', '-b:a', '128k', '-map', '0:v', '-map', '1:a', '-shortest']
     cmd.append(f"{workdir}/final.mp4")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise Exception(f"FFmpeg render error: {result.stderr[-400:]}")
 
-    final_size = os.path.getsize(f"{workdir}/final.mp4")
+    final_path = f"{workdir}/final.mp4"
+    final_size = os.path.getsize(final_path)
     print(f"=== Video final: {final_size} bytes ===")
 
+    # 1. Subir a file.io para obtener URL publica
+    video_url = upload_to_fileio(final_path)
+
+    # 2. Enviar a Telegram
     print("=== Enviando a Telegram ===")
-    with open(f"{workdir}/final.mp4", 'rb') as f:
+    with open(final_path, 'rb') as f:
         r = requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendVideo",
-            data={"chat_id": chat_id, "caption": "🎬 Video listo! ¿Lo aprobamos para publicar?"},
+            data={"chat_id": chat_id, "caption": "🎬 Video listo! Publicando en YouTube y Facebook..."},
             files={"video": ("video.mp4", f, "video/mp4")},
             timeout=300
         )
     result_tg = r.json()
     print(f"Telegram ok: {result_tg.get('ok')}")
     if not result_tg.get('ok'):
-        raise Exception(f"Telegram error: {result_tg}")
+        print(f"Telegram warning: {result_tg}")
 
-    requests.post(callback_url, json={'status': 'done', 'video_url': 'sent_via_telegram'}, timeout=30)
+    # 3. Callback a n8n con URL real y titulo
+    requests.post(callback_url, json={
+        'status': 'done',
+        'video_url': video_url,
+        'titulo': titulo
+    }, timeout=30)
     print("=== COMPLETADO ===")
 
 except Exception as e:
