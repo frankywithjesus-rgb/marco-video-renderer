@@ -1,8 +1,10 @@
 import os, sys, base64, tempfile, subprocess, requests
 
+GOOGLE_TTS_KEY = "AIzaSyCJRk0BsasiDBMOLuLrmcHTaaK9PU0mcsE"
+
 def main():
     video_url = os.environ["VIDEO_URL"]
-    audio_b64 = os.environ["AUDIO_B64"]
+    tts_text  = os.environ["TTS_TEXT"]
     titulo    = os.environ["TITULO"]
     webhook   = os.environ["WEBHOOK_URL"]
     gh_token  = os.environ["GH_TOKEN"]
@@ -10,17 +12,31 @@ def main():
     run_id    = os.environ["GITHUB_RUN_ID"]
 
     with tempfile.TemporaryDirectory() as tmp:
+        # 1. Generar audio con Google TTS
+        tts_resp = requests.post(
+            f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_TTS_KEY}",
+            json={
+                "input": {"text": tts_text},
+                "voice": {"languageCode": "es-ES", "name": "es-ES-Wavenet-B", "ssmlGender": "MALE"},
+                "audioConfig": {"audioEncoding": "MP3", "speakingRate": 1.05, "pitch": -1}
+            },
+            timeout=30
+        )
+        tts_resp.raise_for_status()
+        apath = f"{tmp}/audio.mp3"
+        open(apath, "wb").write(base64.b64decode(tts_resp.json()["audioContent"]))
+
+        # 2. Descargar video Pexels
         vpath = f"{tmp}/clip.mp4"
         open(vpath, "wb").write(requests.get(video_url, timeout=60).content)
 
-        apath = f"{tmp}/audio.mp3"
-        open(apath, "wb").write(base64.b64decode(audio_b64))
-
+        # 3. Duración del audio
         dur = subprocess.check_output([
             "ffprobe", "-v", "error", "-show_entries",
             "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", apath
         ]).decode().strip()
 
+        # 4. FFmpeg: video loop + audio, 9:16
         out = f"{tmp}/final.mp4"
         subprocess.run([
             "ffmpeg", "-y",
@@ -33,6 +49,7 @@ def main():
             "-shortest", out
         ], check=True)
 
+        # 5. Subir a GitHub Releases
         tag = f"social-{run_id}"
         headers = {"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json"}
         rel = requests.post(
@@ -40,7 +57,6 @@ def main():
             headers=headers,
             json={"tag_name": tag, "name": tag, "draft": False, "prerelease": True}
         ).json()
-
         upload_url = rel["upload_url"].replace("{?name,label}", "")
         with open(out, "rb") as f:
             asset = requests.post(
