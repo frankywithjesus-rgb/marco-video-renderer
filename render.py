@@ -155,9 +155,9 @@ try:
 
     vf = (
         "colorchannelmixer=rr=0.4:gg=0.4:bb=0.4,"
-        f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=22,"
+        f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=16,"
         "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
-        "Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=60'"
+        "Bold=1,Outline=2,Shadow=1,Alignment=5,MarginV=0'"
     )
 
     cmd = ['ffmpeg', '-y', '-i', f"{workdir}/base.mp4"]
