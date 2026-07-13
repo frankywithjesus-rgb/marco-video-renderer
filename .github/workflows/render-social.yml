@@ -1,0 +1,29 @@
+name: Render Social Video
+
+on:
+  repository_dispatch:
+    types: [render-social]
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get install -y ffmpeg
+          pip install requests
+
+      - name: Render video
+        env:
+          VIDEO_URL:         ${{ github.event.client_payload.video_url }}
+          AUDIO_B64:         ${{ github.event.client_payload.audio_b64 }}
+          TITULO:            ${{ github.event.client_payload.titulo }}
+          WEBHOOK_URL:       ${{ github.event.client_payload.webhook_url }}
+          GH_TOKEN:          ${{ secrets.GH_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID:     ${{ github.run_id }}
+        run: python render_social.py
