@@ -26,6 +26,21 @@ PEXELS_HEADERS = {
     "Accept": "*/*"
 }
 
+def is_valid_image(path):
+    """Verifica los magic bytes para confirmar que es una imagen real, no un error HTML/JSON."""
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(12)
+        if header[:2] == b'\xff\xd8':  # JPEG
+            return True
+        if header[:8] == b'\x89PNG\r\n\x1a\n':  # PNG
+            return True
+        if header[:4] == b'RIFF' and header[8:12] == b'WEBP':  # WEBP
+            return True
+        return False
+    except Exception:
+        return False
+
 def download(url, path):
     for h in [PEXELS_HEADERS, {}]:
         try:
@@ -35,9 +50,11 @@ def download(url, path):
                     for chunk in r.iter_content(8192):
                         f.write(chunk)
                 size = os.path.getsize(path)
-                if size > 10000:
+                if size > 10000 and is_valid_image(path):
                     print(f"OK {path}: {size} bytes")
                     return path
+                else:
+                    print(f"  Archivo invalido o incompleto ({size} bytes), reintentando...")
         except Exception as e:
             print(f"  Intento fallido: {e}")
     print(f"Usando fallback para {path}")
@@ -70,7 +87,7 @@ def image_to_kenburns(inp, out, dur, zoom_in=True):
         "format=yuv420p"
     )
     result = subprocess.run([
-        'ffmpeg', '-y', '-loop', '1', '-i', inp, '-t', str(dur),
+        'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp, '-t', str(dur),
         '-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out
     ], capture_output=True, text=True)
     if result.returncode != 0:
