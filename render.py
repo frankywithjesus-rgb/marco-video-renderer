@@ -110,7 +110,7 @@ try:
     print("=== Descargando videos ===")
     videos = []
     for i, url in enumerate(bgs):
-        v = download(url, f"{workdir}/v{i+1}.mp4")
+        v = download(url, f"{workdir}/v{i+1}.jpg")
         videos.append(v)
 
     has_audio = bool(audio_url and len(audio_url) > 10)
