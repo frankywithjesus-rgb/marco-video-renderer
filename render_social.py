@@ -107,7 +107,14 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        requests.post(os.environ.get("WEBHOOK_URL", ""), json={
-            "status": "error", "video_url": "", "message": str(e)
-        })
+        import traceback
+        tb = traceback.format_exc()
+        print(f"::error::RENDER FAILED: {e}")
+        print(tb)
+        try:
+            requests.post(os.environ.get("WEBHOOK_URL", ""), json={
+                "status": "error", "video_url": "", "message": f"{e}\n{tb}"[:1500]
+            }, timeout=15)
+        except Exception as e2:
+            print(f"::error::ALSO FAILED TO NOTIFY WEBHOOK: {e2}")
         sys.exit(1)
