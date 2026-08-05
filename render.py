@@ -1,4 +1,4 @@
-import json, os, subprocess, requests, tempfile, sys, traceback, base64, time
+import json, os, subprocess, requests, tempfile, sys, traceback, base64, time, re
 
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
@@ -16,7 +16,7 @@ duration = float(payload.get('duration', 60))
 titulo = payload.get('titulo', 'Historia viral - MarcoPeru')
 
 workdir = tempfile.mkdtemp()
-FALLBACK = "https://videos.pexels.com/video-files/6945204/6945204-hd_1080_1920_30fps.mp4"
+FALLBACK = "https://images.pexels.com/photos/1367192/pexels-photo-1367192.jpeg"
 RELEASE_ID = "352830454"
 REPO = "frankywithjesus-rgb/marco-video-renderer"
 
@@ -56,17 +56,25 @@ def get_audio_duration(path):
     print(f"Duracion del audio: {dur:.1f}s")
     return dur
 
-def loop_video_to_duration(inp, out, dur):
+def image_to_kenburns(inp, out, dur, zoom_in=True):
+    """Convierte una foto fija en un clip con movimiento de zoom/paneo (Ken Burns)."""
+    fps = 30
+    frames = max(1, int(dur * fps))
+    if zoom_in:
+        zexpr = "zoom+0.0018"
+    else:
+        zexpr = "if(lte(zoom,1.0),1.4,zoom-0.0018)"
+    vf = (
+        "scale=2160:3840:force_original_aspect_ratio=increase,crop=2160:3840,"
+        f"zoompan=z='{zexpr}':d={frames}:s=1080x1920:fps={fps},"
+        "format=yuv420p"
+    )
     result = subprocess.run([
-        'ffmpeg', '-y',
-        '-stream_loop', '-1',
-        '-i', inp,
-        '-t', str(dur),
-        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out
+        'ffmpeg', '-y', '-loop', '1', '-i', inp, '-t', str(dur),
+        '-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out
     ], capture_output=True, text=True)
     if result.returncode != 0:
-        raise Exception(f"FFmpeg loop error: {result.stderr[-200:]}")
+        raise Exception(f"FFmpeg Ken Burns error: {result.stderr[-300:]}")
 
 def upload_to_github_release(path, token):
     """Sube video a GitHub Release y retorna URL publica de descarga"""
@@ -121,9 +129,9 @@ try:
     seg = duration / 4
     print(f"Duracion total del video: {duration:.1f}s ({duration/60:.1f} min)")
 
-    print("=== Procesando clips con loop ===")
+    print("=== Animando fotos con efecto Ken Burns ===")
     for i, v in enumerate(videos):
-        loop_video_to_duration(v, f"{workdir}/c{i+1}.mp4", seg)
+        image_to_kenburns(v, f"{workdir}/c{i+1}.mp4", seg, zoom_in=(i % 2 == 0))
 
     print("=== Concatenando ===")
     with open(f"{workdir}/list.txt", 'w') as f:
@@ -134,7 +142,7 @@ try:
         '-i', f"{workdir}/list.txt", '-c', 'copy', f"{workdir}/base.mp4"
     ], check=True, capture_output=True)
 
-    print("=== Renderizando con subtitulos y audio completo ===")
+    print("=== Renderizando con subtitulos frase por frase y audio completo ===")
     t = [0, seg, seg*2, seg*3]
     e = [seg, seg*2, seg*3, duration]
     txts = [texto1, texto2, texto3, texto4]
@@ -147,15 +155,35 @@ try:
         ms = int((secs % 1) * 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+    def split_sentences(text):
+        # Divide por . ! ? conservando el signo, ignora fragmentos vacios
+        parts = re.split(r'(?<=[.!?])\s+', text.strip())
+        return [p.strip() for p in parts if p.strip()]
+
+    entries = []
+    idx = 1
+    for i in range(4):
+        seg_start, seg_end = t[i], e[i]
+        seg_dur = seg_end - seg_start
+        sentences = split_sentences(txts[i]) or [txts[i]]
+        total_chars = sum(len(s) for s in sentences) or 1
+        cursor = seg_start
+        for s in sentences:
+            frac = len(s) / total_chars
+            dur = seg_dur * frac
+            start = cursor
+            end = min(cursor + dur, seg_end)
+            entries.append((idx, start, end, s))
+            idx += 1
+            cursor = end
+
     with open(srt_path, 'w', encoding='utf-8') as srt:
-        for i in range(4):
-            srt.write(f"{i+1}\n")
-            srt.write(f"{format_time(t[i])} --> {format_time(e[i])}\n")
-            srt.write(f"{txts[i]}\n\n")
+        for idx, start, end, s in entries:
+            srt.write(f"{idx}\n{format_time(start)} --> {format_time(end)}\n{s}\n\n")
 
     vf = (
         "colorchannelmixer=rr=0.4:gg=0.4:bb=0.4,"
-        f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=16,"
+        f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=20,"
         "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
         "Bold=1,Outline=2,Shadow=1,Alignment=5,MarginV=0'"
     )
