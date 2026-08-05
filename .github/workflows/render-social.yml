@@ -19,7 +19,7 @@ jobs:
 
       - name: Render video
         env:
-          VIDEO_URLS:         ${{ github.event.client_payload.video_urls }}
+          VIDEO_URLS_B64:     ${{ github.event.client_payload.video_urls_b64 }}
           TTS_TEXT:          ${{ github.event.client_payload.tts_text }}
           TITULO:            ${{ github.event.client_payload.titulo }}
           WEBHOOK_URL:       ${{ github.event.client_payload.webhook_url }}
