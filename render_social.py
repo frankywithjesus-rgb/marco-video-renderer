@@ -3,7 +3,7 @@ import os, sys, base64, tempfile, subprocess, requests, json
 GOOGLE_TTS_KEY = "AIzaSyCJRk0BsasiDBMOLuLrmcHTaaK9PU0mcsE"
 
 def main():
-    video_urls_raw = os.environ["VIDEO_URLS"]
+    video_urls_b64 = os.environ["VIDEO_URLS_B64"]
     tts_text  = os.environ["TTS_TEXT"]
     titulo    = os.environ["TITULO"]
     webhook   = os.environ["WEBHOOK_URL"]
@@ -11,15 +11,14 @@ def main():
     repo      = os.environ["GITHUB_REPOSITORY"]
     run_id    = os.environ["GITHUB_RUN_ID"]
 
-    try:
-        video_urls = json.loads(video_urls_raw)
-        if isinstance(video_urls, str):
-            video_urls = [video_urls]
-    except Exception:
-        video_urls = [video_urls_raw]
+    video_urls_raw = base64.b64decode(video_urls_b64).decode("utf-8")
+    print(f"DEBUG video_urls_raw: {video_urls_raw!r}")
+    video_urls = json.loads(video_urls_raw)
+    if isinstance(video_urls, str):
+        video_urls = [video_urls]
     video_urls = [u for u in video_urls if u][:4]
     if not video_urls:
-        video_urls = [video_urls_raw]
+        raise ValueError(f"No se recibieron video_urls validas. raw={video_urls_raw!r}")
 
     with tempfile.TemporaryDirectory() as tmp:
         # 1. Generar audio con Google TTS
