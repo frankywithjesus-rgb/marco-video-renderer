@@ -16,28 +16,21 @@ workdir = tempfile.mkdtemp()
 FALLBACK = "https://images.pexels.com/photos/1367192/pexels-photo-1367192.jpeg"
 FPS = 24
 W, H = 1280, 720
-XFADE_DUR = 0.5  # segundos de transición entre escenas
+XFADE_DUR = 0.6
 
-# Movimientos disponibles — alternan por escena para dar variedad
-# Movimientos: escalamos a 2x, hacemos zoompan SOLO con zoom (sin paneo ahi),
-# luego un crop animado con expresion de tiempo 't' para el paneo lateral/vertical.
-# Este enfoque funciona en cualquier version de FFmpeg incluyendo la de ubuntu-latest.
-# Formato: (zoom_expr_zoompan, crop_x_expr, crop_y_expr, descripcion)
+# Movimientos de camara: scale a 120% + crop animado con 't'
+# Todos usan escala 1.2x (1536x864) y recortan a 1280x720 moviéndose
+# El crop offset maximo: x=256 (1536-1280), y=144 (864-720)
+# crop=w:h:x:y donde x,y son expresiones de tiempo
 MOVEMENTS = [
-    # zoom-in suave, paneo derecha
-    ("zoom+0.0008", "{cx}+t*2",                    "{cy}",              "zoom-in paneo dcha"),
-    # zoom-in suave, paneo izquierda
-    ("zoom+0.0008", "max(0,{cx}-t*2)",              "{cy}",              "zoom-in paneo izq"),
-    # zoom-in suave, sin paneo
-    ("zoom+0.0008", "{cx}",                         "{cy}",              "zoom-in centro"),
-    # zoom-in suave, paneo abajo
-    ("zoom+0.0008", "{cx}",                         "min({cy2},t*1.5)",  "zoom-in paneo abajo"),
-    # zoom-out suave, sin paneo
-    ("if(lte(zoom,1.0),1.15,zoom-0.0008)", "{cx}", "{cy}",              "zoom-out centro"),
-    # zoom-out suave, paneo diagonal
-    ("if(lte(zoom,1.0),1.15,zoom-0.0008)", "max(0,{cx}-t*1.5)", "max(0,{cy}-t*1)", "zoom-out diagonal"),
-    # zoom muy lento, paneo vertical
-    ("zoom+0.0004", "{cx}",                         "max(0,{cy}-t*1)",   "zoom micro paneo arriba"),
+    # (desc, scale, crop_x_expr, crop_y_expr)
+    ("zoom-in paneo dcha",   "1536:864", f"min(256,t*8)",                    "72"),
+    ("zoom-in paneo izq",    "1536:864", f"max(0,256-t*8)",                  "72"),
+    ("zoom-in centro fijo",  "1536:864", "128",                               "72"),
+    ("zoom-in paneo abajo",  "1536:864", "128",                               f"min(144,t*6)"),
+    ("zoom-in paneo arriba", "1536:864", "128",                               f"max(0,144-t*6)"),
+    ("zoom-in diagonal",     "1536:864", f"min(256,t*7)",                    f"min(144,t*5)"),
+    ("zoom-in diag inv",     "1536:864", f"max(0,256-t*7)",                  f"max(0,144-t*5)"),
 ]
 
 def is_valid_image(path):
@@ -93,87 +86,65 @@ def get_audio_duration(path):
     return dur
 
 def image_to_clip(inp, out, dur, movement_idx):
-    """Convierte una imagen en un clip con movimiento de camara variado.
-    Estrategia: escalar a 2x, zoompan solo-zoom (sin paneo en zoompan para
-    compatibilidad con todas las versiones de FFmpeg), luego crop animado
-    con 't' para el paneo lateral/vertical."""
-    frames = max(1, int(dur * FPS))
+    """Imagen → clip con movimiento de camara via scale+crop animado.
+    No usa zoompan — 100% compatible con todas las versiones de FFmpeg."""
     mv = MOVEMENTS[movement_idx % len(MOVEMENTS)]
-    zoom_expr, cx_expr, cy_expr, desc = mv
-
-    # Centro de referencia del crop (el resto del frame 2x despues del zoom)
-    # W2/H2 = 2560/1440, crop destino = W/H = 1280/720
-    # El offset maximo de crop en x = W2 - W = 1280, en y = H2 - H = 720
-    cx = (W * 2 - W) // 2  # = 640
-    cy = (H * 2 - H) // 2  # = 360
-    cx2 = W * 2 - W         # = 1280 (max x para crop)
-    cy2 = H * 2 - H         # = 720  (max y para crop)
-
-    cx_resolved = cx_expr.replace("{cx}", str(cx)).replace("{cy}", str(cy)).replace("{cx2}", str(cx2)).replace("{cy2}", str(cy2))
-    cy_resolved = cy_expr.replace("{cx}", str(cx)).replace("{cy}", str(cy)).replace("{cx2}", str(cx2)).replace("{cy2}", str(cy2))
-
-    # clip x/y del crop deben estar en [0, max] -- wrapeamos con min/max de ffmpeg
-    cx_safe = f"min({cx2},max(0,{cx_resolved}))"
-    cy_safe = f"min({cy2},max(0,{cy_resolved}))"
+    desc, scale, cx_expr, cy_expr = mv
+    sw, sh = scale.split(':')
 
     vf = (
-        f"scale={W*2}:{H*2}:force_original_aspect_ratio=increase,crop={W*2}:{H*2},"
-        f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-        f":d={frames}:s={W*2}x{H*2}:fps={FPS},"
-        f"crop={W}:{H}:{cx_safe}:{cy_safe},"
+        f"scale={sw}:{sh}:force_original_aspect_ratio=increase,"
+        f"crop={sw}:{sh},"          # asegurar dimensiones exactas post-scale
+        f"crop={W}:{H}:{cx_expr}:{cy_expr},"
         "format=yuv420p"
     )
-    print(f"  Clip mov={movement_idx % len(MOVEMENTS)} ({desc}): {dur:.1f}s {frames}f", flush=True)
+    print(f"  Clip mov={movement_idx % len(MOVEMENTS)} ({desc}): {dur:.1f}s", flush=True)
     try:
         result = subprocess.run([
-            'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp,
+            'ffmpeg', '-y',
+            '-f', 'image2', '-loop', '1', '-framerate', str(FPS), '-i', inp,
             '-t', str(dur), '-vf', vf,
-            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-an', out
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25',
+            '-r', str(FPS), '-an', out
         ], capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        raise Exception(f"FFmpeg clip colgado en {inp} ({dur:.1f}s, {frames}f)")
+        raise Exception(f"FFmpeg clip colgado en {inp} ({dur:.1f}s)")
     if result.returncode != 0:
-        raise Exception(f"FFmpeg clip error: {result.stderr[-400:]}")
+        raise Exception(f"FFmpeg clip error: {result.stderr[-500:]}")
     print(f"  -> listo: {out}", flush=True)
 
 def concat_with_xfade(clips, durations, out_path):
-    """Encadena clips con transiciones xfade entre ellos."""
+    """Encadena clips con transiciones xfade suaves."""
     if len(clips) == 1:
-        subprocess.run(
-            ['ffmpeg', '-y', '-i', clips[0], '-c', 'copy', out_path],
-            check=True, capture_output=True, timeout=120
-        )
+        subprocess.run(['ffmpeg', '-y', '-i', clips[0], '-c', 'copy', out_path],
+                       check=True, capture_output=True, timeout=60)
         return
 
-    # Tipos de transición que alternan — xfade soporta muchos
     TRANSITIONS = ['fade', 'dissolve', 'wipeleft', 'wiperight', 'slideleft', 'slideright', 'fadeblack']
-
     n = len(clips)
-    # Inputs
     cmd = ['ffmpeg', '-y']
     for c in clips:
         cmd += ['-i', c]
 
-    # filter_complex encadenado: [0][1]xfade → tmp0, [tmp0][2]xfade → tmp1, ...
     filters = []
     prev = '0:v'
-    cumulative_offset = 0.0
+    offset = 0.0
     for i in range(1, n):
         trans = TRANSITIONS[(i - 1) % len(TRANSITIONS)]
-        offset = cumulative_offset + durations[i - 1] - XFADE_DUR
-        offset = max(0.0, offset)
+        offset_val = offset + durations[i - 1] - XFADE_DUR
+        offset_val = max(0.01, offset_val)
         out_label = f"xf{i}" if i < n - 1 else "vout"
         filters.append(
             f"[{prev}][{i}:v]xfade=transition={trans}"
-            f":duration={XFADE_DUR}:offset={offset:.3f}[{out_label}]"
+            f":duration={XFADE_DUR}:offset={offset_val:.3f}[{out_label}]"
         )
         prev = out_label
-        cumulative_offset += durations[i - 1] - XFADE_DUR
+        offset += durations[i - 1] - XFADE_DUR
 
-    fc = ';'.join(filters)
-    cmd += ['-filter_complex', fc, '-map', '[vout]',
+    cmd += ['-filter_complex', ';'.join(filters),
+            '-map', '[vout]',
             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out_path]
-    print(f"  xfade entre {n} clips ({', '.join(TRANSITIONS[:n-1])})...", flush=True)
+    print(f"  xfade: {n} clips, transiciones {TRANSITIONS[:n-1]}", flush=True)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
@@ -187,34 +158,27 @@ def upload_to_github_release(path, token):
     headers = {"Authorization": f"token {token}"}
     assets = requests.get(
         f"https://api.github.com/repos/{repo}/releases/{release_id}/assets",
-        headers=headers
-    ).json()
+        headers=headers).json()
     for asset in assets:
         requests.delete(
             f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}",
-            headers=headers
-        )
-        print(f"  Borrado asset anterior: {asset['name']}")
+            headers=headers)
+        print(f"  Borrado: {asset['name']}")
     filename = f"episodio_{int(time.time())}.mp4"
-    upload_url = f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={filename}"
     with open(path, 'rb') as f:
         r = requests.post(
-            upload_url,
+            f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={filename}",
             headers={**headers, "Content-Type": "video/mp4"},
-            data=f, timeout=300
-        )
+            data=f, timeout=300)
     data = r.json()
     if r.status_code in (200, 201) and 'browser_download_url' in data:
-        url = data['browser_download_url']
-        print(f"URL publica: {url}")
-        return url
-    raise Exception(f"GitHub Release upload error: {r.status_code} {data}")
+        print(f"URL: {data['browser_download_url']}")
+        return data['browser_download_url']
+    raise Exception(f"GitHub Release error: {r.status_code} {data}")
 
 def format_time(secs):
-    h = int(secs // 3600)
-    m = int((secs % 3600) // 60)
-    s = int(secs % 60)
-    ms = int((secs % 1) * 1000)
+    h = int(secs // 3600); m = int((secs % 3600) // 60)
+    s = int(secs % 60); ms = int((secs % 1) * 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 def split_sentences(text):
@@ -222,7 +186,7 @@ def split_sentences(text):
     return [p.strip() for p in parts if p.strip()]
 
 try:
-    print("=== Descargando imagenes de escenas ===")
+    print("=== Descargando imagenes ===")
     images = []
     for i, sc in enumerate(scenes):
         images.append(download(sc['image'], f"{workdir}/s{i+1}"))
@@ -233,8 +197,7 @@ try:
         r = requests.get(audio_url, timeout=120, stream=True)
         audio = f"{workdir}/audio.mp3"
         with open(audio, 'wb') as f:
-            for chunk in r.iter_content(8192):
-                f.write(chunk)
+            for chunk in r.iter_content(8192): f.write(chunk)
         print(f"Audio: {os.path.getsize(audio)} bytes")
         total_duration = get_audio_duration(audio)
     else:
@@ -242,48 +205,38 @@ try:
 
     char_counts = [max(len(sc.get('text', '')), 1) for sc in scenes]
     total_chars = sum(char_counts)
-    # Compensar el tiempo "robado" por xfade en cada transición
     n_transitions = len(scenes) - 1
-    effective_duration = total_duration + n_transitions * XFADE_DUR
-    durations = [effective_duration * c / total_chars for c in char_counts]
-    print(f"Duracion total: {total_duration:.1f}s, {len(scenes)} escenas, {n_transitions} transiciones xfade")
-    print(f"Duraciones por escena: {[round(d,1) for d in durations]}")
+    effective = total_duration + n_transitions * XFADE_DUR
+    durations = [effective * c / total_chars for c in char_counts]
+    print(f"Total: {total_duration:.1f}s, {len(scenes)} escenas, duraciones: {[round(d,1) for d in durations]}")
 
     print("=== Generando clips con movimiento variado ===")
-    # Mezclar el orden de movimientos aleatoriamente pero de forma reproducible
-    random.seed(len(scenes))
-    movement_order = list(range(len(MOVEMENTS)))
-    random.shuffle(movement_order)
+    random.seed(42)
+    order = list(range(len(MOVEMENTS)))
+    random.shuffle(order)
     clips = []
     for i, (img, dur) in enumerate(zip(images, durations)):
         out = f"{workdir}/c{i+1}.mp4"
-        image_to_clip(img, out, dur, movement_order[i % len(movement_order)])
+        image_to_clip(img, out, dur, order[i % len(order)])
         clips.append(out)
 
-    print("=== Concatenando con transiciones xfade ===")
+    print("=== Concatenando con xfade ===")
     base_path = f"{workdir}/base.mp4"
     concat_with_xfade(clips, durations, base_path)
 
-    print("=== Generando subtitulos .srt ===")
+    print("=== Generando subtitulos ===")
     srt_path = f"{workdir}/subs.srt"
-    entries = []
-    idx = 1
-    cursor = 0.0
+    entries = []; idx = 1; cursor = 0.0
     for sc, dur in zip(scenes, durations):
-        seg_start = cursor
-        seg_end = cursor + dur
         sentences = split_sentences(sc.get('text', '')) or [sc.get('text', '')]
-        total_chars_seg = sum(len(s) for s in sentences) or 1
-        c2 = seg_start
+        total_c = sum(len(s) for s in sentences) or 1
+        c2 = cursor
         for s in sentences:
-            frac = len(s) / total_chars_seg
+            frac = len(s) / total_c
             d = dur * frac
-            start = c2
-            end = min(c2 + d, seg_end)
-            entries.append((idx, start, end, s))
-            idx += 1
-            c2 = end
-        cursor += dur - XFADE_DUR  # ajustar cursor por el overlap del xfade
+            entries.append((idx, c2, min(c2 + d, cursor + dur), s))
+            idx += 1; c2 += d
+        cursor += dur - XFADE_DUR
 
     with open(srt_path, 'w', encoding='utf-8') as srt:
         for idx, start, end, s in entries:
@@ -295,21 +248,14 @@ try:
         "Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=50"
     )
 
-    print("=== Render final (subtitulos + audio) ===")
+    print("=== Render final ===")
     cmd = ['ffmpeg', '-y', '-i', base_path]
-    if has_audio:
-        cmd += ['-i', audio]
-    cmd += [
-        '-vf', f"subtitles={srt_path}:force_style='{sub_style}'",
-        '-map', '0:v'
-    ]
-    if has_audio:
-        cmd += ['-map', '1:a']
+    if has_audio: cmd += ['-i', audio]
+    cmd += ['-vf', f"subtitles={srt_path}:force_style='{sub_style}'", '-map', '0:v']
+    if has_audio: cmd += ['-map', '1:a']
     cmd += ['-c:v', 'libx264', '-preset', 'fast', '-crf', '22']
-    if has_audio:
-        cmd += ['-c:a', 'aac', '-b:a', '128k', '-shortest']
+    if has_audio: cmd += ['-c:a', 'aac', '-b:a', '128k', '-shortest']
     cmd.append(f"{workdir}/final.mp4")
-    print(f"  Renderizando...", flush=True)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
@@ -328,16 +274,13 @@ try:
         r = requests.post(
             f"https://api.telegram.org/bot{bot_token}/sendVideo",
             data={"chat_id": chat_id, "caption": f"🎬 {titulo} listo!"},
-            files={"video": ("video.mp4", f, "video/mp4")},
-            timeout=300
-        )
+            files={"video": ("video.mp4", f, "video/mp4")}, timeout=300)
     print(f"Telegram ok: {r.json().get('ok')}")
 
     requests.post(callback_url, json={'status': 'done', 'video_url': video_url, 'titulo': titulo}, timeout=30)
     print("=== COMPLETADO ===")
 
 except Exception as e:
-    tb = traceback.format_exc()
-    print(f"ERROR:\n{tb}")
+    print(f"ERROR:\n{traceback.format_exc()}")
     requests.post(callback_url, json={'video_url': '', 'status': 'error', 'message': str(e)}, timeout=15)
     sys.exit(1)
