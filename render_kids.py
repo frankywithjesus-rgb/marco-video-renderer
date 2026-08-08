@@ -57,20 +57,29 @@ def get_audio_duration(path):
     return dur
 
 def image_to_kenburns(inp, out, dur, zoom_in=True):
-    fps = 30
+    # Resolucion de trabajo reducida (720p) y fps mas bajo: zoompan es MUY pesado
+    # por-frame en CPU, y a 1080p/30fps con escenas largas (~20-25s) se pasaba
+    # del limite de 25 min del job. 1280x720@20fps recorta el trabajo total a
+    # menos de la mitad manteniendo buena calidad percibida en YouTube/redes.
+    fps = 20
     frames = max(1, int(dur * fps))
     zexpr = "zoom+0.0012" if zoom_in else "if(lte(zoom,1.0),1.25,zoom-0.0012)"
     vf = (
-        "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,"
-        f"zoompan=z='{zexpr}':d={frames}:s=1920x1080:fps={fps},"
+        "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,"
+        f"zoompan=z='{zexpr}':d={frames}:s=1280x720:fps={fps},"
         "format=yuv420p"
     )
-    result = subprocess.run([
-        'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp, '-t', str(dur),
-        '-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', out
-    ], capture_output=True, text=True)
+    print(f"  Ken Burns: {dur:.1f}s, {frames} frames @ {fps}fps, zoom_in={zoom_in}", flush=True)
+    try:
+        result = subprocess.run([
+            'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp, '-t', str(dur),
+            '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-an', out
+        ], capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise Exception(f"FFmpeg Ken Burns colgado mas de 300s en {inp} (dur={dur:.1f}s, {frames} frames)")
     if result.returncode != 0:
         raise Exception(f"FFmpeg Ken Burns error: {result.stderr[-300:]}")
+    print(f"  -> listo: {out}", flush=True)
 
 def upload_to_github_release(path, token):
     print("=== Subiendo video a GitHub Release ===")
@@ -133,7 +142,8 @@ try:
     with open(f"{workdir}/list.txt", 'w') as f:
         for i in range(1, len(scenes) + 1):
             f.write(f"file '{workdir}/c{i}.mp4'\n")
-    subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', f"{workdir}/list.txt", '-c', 'copy', f"{workdir}/base.mp4"], check=True, capture_output=True)
+    subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', f"{workdir}/list.txt", '-c', 'copy', f"{workdir}/base.mp4"], check=True, capture_output=True, timeout=120)
+    print("  -> concatenado listo", flush=True)
 
     print("=== Generando subtitulos por escena ===")
     srt_path = f"{workdir}/subs.srt"
@@ -173,9 +183,14 @@ try:
     if has_audio:
         cmd += ['-c:a', 'aac', '-b:a', '128k', '-map', '0:v', '-map', '1:a', '-shortest']
     cmd.append(f"{workdir}/final.mp4")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    print("  Renderizando video final con subtitulos...", flush=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise Exception("FFmpeg render final colgado mas de 300s")
     if result.returncode != 0:
         raise Exception(f"FFmpeg render error: {result.stderr[-400:]}")
+    print("  -> render final listo", flush=True)
 
     final_path = f"{workdir}/final.mp4"
     print(f"=== Video final: {os.path.getsize(final_path)} bytes ===")
