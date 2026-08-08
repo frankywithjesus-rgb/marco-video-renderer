@@ -29,25 +29,47 @@ def is_valid_image(path):
     except Exception:
         return False
 
-def download(url, path):
+def detect_ext(path):
+    """Detecta la extension real por magic bytes. Guardar con la extension
+    equivocada (ej. .jpg para bytes PNG) hace que el demuxer image2 de FFmpeg
+    intente decodificar con el codec incorrecto y se quede colgado esperando
+    frames validos que nunca llegan -- esta fue la causa real de los renders
+    que se colgaban hasta el limite de tiempo del job."""
+    with open(path, 'rb') as f:
+        header = f.read(12)
+    if header[:2] == b'\xff\xd8':
+        return '.jpg'
+    if header[:8] == b'\x89PNG\r\n\x1a\n':
+        return '.png'
+    if header[:4] == b'RIFF' and header[8:12] == b'WEBP':
+        return '.webp'
+    return '.jpg'
+
+def download(url, base_path):
+    """base_path SIN extension (ej. /tmp/x/s1) -- la extension final se decide
+    por el contenido real descargado, no se asume de antemano."""
+    tmp_path = base_path + '.tmp'
     try:
         r = requests.get(url, timeout=120, stream=True)
         if r.status_code == 200:
-            with open(path, 'wb') as f:
+            with open(tmp_path, 'wb') as f:
                 for chunk in r.iter_content(8192):
                     f.write(chunk)
-            size = os.path.getsize(path)
-            if size > 5000 and is_valid_image(path):
-                print(f"OK {path}: {size} bytes")
-                return path
+            size = os.path.getsize(tmp_path)
+            if size > 5000 and is_valid_image(tmp_path):
+                final_path = base_path + detect_ext(tmp_path)
+                os.rename(tmp_path, final_path)
+                print(f"OK {final_path}: {size} bytes")
+                return final_path
     except Exception as e:
         print(f"  Intento fallido: {e}")
-    print(f"Usando fallback para {path}")
+    print(f"Usando fallback para {base_path}")
+    final_path = base_path + '.jpg'
     r = requests.get(FALLBACK, timeout=120, stream=True)
-    with open(path, 'wb') as f:
+    with open(final_path, 'wb') as f:
         for chunk in r.iter_content(8192):
             f.write(chunk)
-    return path
+    return final_path
 
 def get_audio_duration(path):
     r = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', path], capture_output=True, text=True)
@@ -114,7 +136,7 @@ try:
     print("=== Descargando imagenes de escenas ===")
     images = []
     for i, sc in enumerate(scenes):
-        images.append(download(sc['image'], f"{workdir}/s{i+1}.jpg"))
+        images.append(download(sc['image'], f"{workdir}/s{i+1}"))
 
     has_audio = bool(audio_url and len(audio_url) > 10)
     if has_audio:
