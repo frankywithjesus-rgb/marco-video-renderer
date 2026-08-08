@@ -19,15 +19,18 @@ W, H = 1280, 720
 XFADE_DUR = 0.5  # segundos de transición entre escenas
 
 # Movimientos disponibles — alternan por escena para dar variedad
+# Expresiones zoompan validadas. Regla: x debe estar en [0, iw-iw/zoom],
+# y debe estar en [0, ih-ih/zoom]. Usamos max(0,min(...)) para seguridad.
+# El paneo usa 'n' (numero de frame actual) multiplicado por un delta pequeno.
 MOVEMENTS = [
-    # (zoom_expr, x_expr, y_expr, descripcion)
-    ("zoom+0.001",  "iw/2-(iw/zoom/2)",        "ih/2-(ih/zoom/2)",        "zoom-in centro"),
-    ("zoom+0.001",  "0",                         "ih/2-(ih/zoom/2)",        "zoom-in paneo dcha"),
-    ("zoom+0.001",  "iw-(iw/zoom)",              "ih/2-(ih/zoom/2)",        "zoom-in paneo izq"),
-    ("zoom+0.001",  "iw/2-(iw/zoom/2)",          "0",                       "zoom-in paneo abajo"),
-    ("if(lte(zoom,1.0),1.2,zoom-0.001)", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)", "zoom-out centro"),
-    ("if(lte(zoom,1.0),1.2,zoom-0.001)", "0",                "0",                "zoom-out esquina TL"),
-    ("zoom+0.0008", "iw/2-(iw/zoom/2)+{pan}",   "ih/2-(ih/zoom/2)",        "zoom-in paneo diagonal"),
+    # vf completo por movimiento (mas simple que expresiones separadas)
+    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
+    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='max(0,iw/2-(iw/zoom/2)-n*0.4)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
+    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='min(iw-iw/zoom,iw/2-(iw/zoom/2)+n*0.4)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
+    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='iw/2-(iw/zoom/2)':y='max(0,ih/2-(ih/zoom/2)-n*0.3)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
+    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='if(lte(zoom,1.0),1.18,zoom-0.001)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
+    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='if(lte(zoom,1.0),1.18,zoom-0.001)':x='max(0,iw/2-(iw/zoom/2)-n*0.4)':y='max(0,ih/2-(ih/zoom/2)-n*0.3)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
+    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.0008':x='min(iw-iw/zoom,n*0.5)':y='min(ih-ih/zoom,n*0.3)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
 ]
 
 def is_valid_image(path):
@@ -83,22 +86,11 @@ def get_audio_duration(path):
     return dur
 
 def image_to_clip(inp, out, dur, movement_idx):
-    """Convierte una imagen en un clip con movimiento de cámara variado."""
+    """Convierte una imagen en un clip con movimiento de camara variado."""
     frames = max(1, int(dur * FPS))
-    mv = MOVEMENTS[movement_idx % len(MOVEMENTS)]
-    zoom_expr = mv[0]
-    x_expr = mv[1].replace('{pan}', f'(t/{dur})*80')  # paneo de hasta 80px
-    y_expr = mv[2]
-    desc = mv[3]
-
-    vf = (
-        f"scale={W*2}:{H*2}:force_original_aspect_ratio=increase,"
-        f"crop={W*2}:{H*2},"
-        f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}'"
-        f":d={frames}:s={W}x{H}:fps={FPS},"
-        "format=yuv420p"
-    )
-    print(f"  Clip {movement_idx+1}: {dur:.1f}s, {frames}f, '{desc}'", flush=True)
+    vf_template = MOVEMENTS[movement_idx % len(MOVEMENTS)]
+    vf = vf_template.format(W=W, H=H, W2=W*2, H2=H*2, fps=FPS, frames=frames)
+    print(f"  Clip {movement_idx+1}: {dur:.1f}s, {frames}f, mov={movement_idx % len(MOVEMENTS)}", flush=True)
     try:
         result = subprocess.run([
             'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp,
