@@ -26,16 +26,17 @@ XFADE_DUR = 0.6
 # Escala siempre a 1536x864 (1.2x de 1280x720).
 # crop=1280:720:X:Y donde X in [0,256] y Y in [0,144].
 # Expresiones usan 't' (tiempo en segundos) -- soportado en TODAS las versiones de ffmpeg.
-# MOVIMIENTOS: expresiones sin comas (FFmpeg trata comas como separador de filtros en -vf).
-# min(A,B) => if(gte(A,B),B,A)  | max(A,B) => if(lte(A,B),B,A)
+# MOVIMIENTOS: (desc, x_start, x_end, y_start, y_end)
+# Interpolacion lineal de crop offset en 1536x864 -> 1280x720
+# x rango: 0..256 (1536-1280), y rango: 0..144 (864-720)
 MOVEMENTS = [
-    ("paneo dcha",   "if(gte(t*10,256),256,t*10)",           "72"),
-    ("paneo izq",    "if(lte(256-t*10,0),0,256-t*10)",       "72"),
-    ("centro fijo",  "128",                                    "72"),
-    ("paneo abajo",  "128",                                    "if(gte(t*8,144),144,t*8)"),
-    ("paneo arriba", "128",                                    "if(lte(144-t*8,0),0,144-t*8)"),
-    ("diagonal",     "if(gte(t*9,256),256,t*9)",              "if(gte(t*6,144),144,t*6)"),
-    ("diag inv",     "if(lte(256-t*9,0),0,256-t*9)",         "if(lte(144-t*6,0),0,144-t*6)"),
+    ("paneo dcha",    0,   220,  72,  72),   # paneo izq->dcha
+    ("paneo izq",   220,     0,  72,  72),   # paneo dcha->izq
+    ("centro fijo", 128,   128,  72,  72),   # sin paneo, zoom visual
+    ("paneo abajo",  72,    72,   0, 120),   # paneo arriba->abajo
+    ("paneo arriba", 72,    72, 120,   0),   # paneo abajo->arriba
+    ("diagonal",      0,   200,   0, 120),   # esquina TL -> BR
+    ("diag inv",    200,     0, 120,   0),   # esquina BR -> TL
 ]
 
 def is_valid_image(path):
@@ -91,40 +92,58 @@ def get_audio_duration(path):
     return dur
 
 def image_to_clip(inp, out, dur, movement_idx):
-    """Imagen -> clip con movimiento via scale + crop animado.
-    Usa filter_complex en vez de -vf para evitar el parsing ambiguo de
-    parentesis y comas que FFmpeg hace en cadenas de -vf."""
+    """Imagen -> clip con movimiento via scale + multiples crops estaticos concatenados.
+    Python calcula el offset numerico para cada segmento -- sin expresiones dinamicas
+    de FFmpeg, funciona en cualquier version."""
     mv = MOVEMENTS[movement_idx % len(MOVEMENTS)]
-    desc, cx_expr, cy_expr = mv
-    frames = max(1, int(dur * FPS))
-    tmp = out + '.tmp.mp4'
+    desc, x_start, x_end, y_start, y_end = mv
 
-    # Paso 1: imagen -> video estatico escalado a 1536x864
-    r1 = subprocess.run([
-        'ffmpeg', '-y',
-        '-f', 'image2', '-loop', '1', '-framerate', str(FPS), '-i', inp,
-        '-t', str(dur),
-        '-vf', 'scale=1536:864:force_original_aspect_ratio=increase,crop=1536:864,format=yuv420p',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-r', str(FPS), '-an', tmp
-    ], capture_output=True, text=True, timeout=300)
-    if r1.returncode != 0:
-        raise Exception(f"FFmpeg scale error: {r1.stderr[-400:]}")
+    # Dividir la escena en N segmentos de ~0.5s cada uno con offsets interpolados
+    SEG_DUR = 0.5
+    n_segs = max(1, int(dur / SEG_DUR))
+    seg_dur = dur / n_segs
 
-    # Paso 2: crop animado via filter_complex (las expresiones no se parsean como filtros)
-    fc = f"[0:v]crop={W}:{H}:{cx_expr}:{cy_expr},format=yuv420p[v]"
-    r2 = subprocess.run([
-        'ffmpeg', '-y', '-i', tmp,
-        '-filter_complex', fc,
-        '-map', '[v]',
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-r', str(FPS), '-an', out
-    ], capture_output=True, text=True, timeout=300)
-    try:
-        os.remove(tmp)
-    except Exception:
-        pass
-    if r2.returncode != 0:
-        raise Exception(f"FFmpeg crop error: {r2.stderr[-400:]}")
-    print(f"  -> listo: {out}", flush=True)
+    tmp_clips = []
+    for seg_i in range(n_segs):
+        t = (seg_i + 0.5) / n_segs  # fraccion de tiempo 0..1
+        cx = int(x_start + (x_end - x_start) * t)
+        cy = int(y_start + (y_end - y_start) * t)
+        cx = max(0, min(256, cx))
+        cy = max(0, min(144, cy))
+        seg_out = f"{out}.seg{seg_i}.mp4"
+        tmp_clips.append(seg_out)
+
+        vf = (
+            f"scale=1536:864:force_original_aspect_ratio=increase,crop=1536:864,"
+            f"crop={W}:{H}:{cx}:{cy},format=yuv420p"
+        )
+        r = subprocess.run([
+            'ffmpeg', '-y',
+            '-f', 'image2', '-loop', '1', '-framerate', str(FPS), '-i', inp,
+            '-t', str(round(seg_dur, 3)), '-vf', vf,
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+            '-r', str(FPS), '-an', seg_out
+        ], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise Exception(f"FFmpeg seg error (mov={movement_idx},seg={seg_i}): {r.stderr[-300:]}")
+
+    # Concatenar segmentos en el clip final
+    list_path = out + '.list.txt'
+    with open(list_path, 'w') as lf:
+        for tc in tmp_clips:
+            lf.write(f"file '{tc}'\n")
+    r = subprocess.run([
+        'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_path,
+        '-c', 'copy', out
+    ], capture_output=True, text=True, timeout=120)
+    for tc in tmp_clips:
+        try: os.remove(tc)
+        except: pass
+    try: os.remove(list_path)
+    except: pass
+    if r.returncode != 0:
+        raise Exception(f"FFmpeg concat clip error: {r.stderr[-300:]}")
+    print(f"  -> listo: {out} ({n_segs} segs, mov={movement_idx % len(MOVEMENTS)} {desc})", flush=True)
 
 def concat_with_xfade(clips, durations, out_path):
     """Encadena clips con transiciones xfade suaves."""
