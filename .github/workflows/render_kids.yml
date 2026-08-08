@@ -1,0 +1,36 @@
+name: Render Escuela Sabática Kids
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: 'JSON payload'
+        required: true
+        type: string
+      callback_url:
+        description: 'Webhook URL n8n'
+        required: true
+        type: string
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar dependencias
+        run: |
+          sudo apt-get install -y ffmpeg
+          pip3 install requests
+      - name: Renderizar
+        env:
+          PAYLOAD: ${{ github.event.inputs.payload }}
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: "367237403"
+          REPO: "frankywithjesus-rgb/marco-video-renderer"
+        run: python3 render_kids.py
