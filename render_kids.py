@@ -17,6 +17,7 @@ FALLBACK = "https://images.pexels.com/photos/1367192/pexels-photo-1367192.jpeg"
 FPS = 24
 W, H = 1280, 720
 XFADE_DUR = 0.6
+escritura_texts = {}  # ruta de imagen -> texto a animar (para escenas tipo "escritura")
 
 # Movimientos de camara: scale a 120% + crop animado con 't'
 # Todos usan escala 1.2x (1536x864) y recortan a 1280x720 moviéndose
@@ -144,6 +145,83 @@ def image_to_clip(inp, out, dur, movement_idx):
         raise Exception(f"FFmpeg concat clip error: {r.stderr[-300:]}")
     print(f"  -> listo: {out} ({n_segs} segs, mov={movement_idx % len(MOVEMENTS)} {desc})", flush=True)
 
+def _wrap_words(words, max_chars_per_line=38):
+    """Distribuye palabras en lineas (para el efecto de escritura), devuelve
+    lista de (word, line_index)."""
+    layout = []
+    line_idx = 0
+    line_len = 0
+    for w in words:
+        wlen = len(w) + 1
+        if line_len + wlen > max_chars_per_line and line_len > 0:
+            line_idx += 1
+            line_len = 0
+        layout.append((w, line_idx))
+        line_len += wlen
+    return layout
+
+def escritura_clip(inp, out, dur):
+    """Para escenas tipo 'escritura': anima el texto de la propia escena
+    apareciendo palabra por palabra (tipo maquina de escribir) sobre la
+    imagen (mano + pergamino generada por Gemini), con un zoom lento de
+    fondo para no sentirse congelada. No usa MOVEMENTS/crop porque el
+    encuadre debe quedarse quieto para que el texto sea legible."""
+    text = escritura_texts.get(inp, '')
+    words = [w for w in re.split(r'\s+', text.strip()) if w]
+    if not words:
+        words = ['...']
+    layout = _wrap_words(words, max_chars_per_line=38)
+    n_lines = layout[-1][1] + 1
+    per_word = dur / max(len(words), 1)
+
+    font_size = 34
+    line_height = 46
+    top_margin = H - (n_lines * line_height) - 60
+
+    frames = max(1, int(dur * FPS))
+    base_vf = (
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"zoompan=z='min(zoom+0.0006,1.08)':d={frames}:s={W}x{H}:fps={FPS},"
+        "format=yuv420p[bg]"
+    )
+    filters = [base_vf]
+    last = 'bg'
+    char_w = 19
+    line_texts = {}
+    for w, li in layout:
+        line_texts.setdefault(li, []).append(w)
+
+    line_progress = {li: [] for li in range(n_lines)}
+    for i, (w, li) in enumerate(layout):
+        reveal_t = round(i * per_word, 2)
+        line_progress[li].append(w)
+        rendered = ' '.join(line_progress[li])
+        safe_text = rendered.replace(':', '\\:').replace("'", "\u2019")
+        x_pos = W // 2 - (len(line_texts[li]) * char_w) // 2
+        y_pos = top_margin + li * line_height
+        node = f"t{i}"
+        filters.append(
+            f"[{last}]drawtext=text='{safe_text}':fontcolor=white:fontsize={font_size}:"
+            f"box=1:boxcolor=black@0.45:boxborderw=10:x={x_pos}:y={y_pos}:"
+            f"enable='gte(t,{reveal_t})'[{node}]"
+        )
+        last = node
+
+    filter_complex = ';'.join(filters)
+    cmd = [
+        'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-framerate', str(FPS), '-i', inp, '-t', str(dur),
+        '-filter_complex', filter_complex, '-map', f'[{last}]',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-an', out
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise Exception(f"FFmpeg escritura colgado mas de 300s en {inp}")
+    if result.returncode != 0:
+        raise Exception(f"FFmpeg escritura error: {result.stderr[-500:]}")
+    print(f"  -> listo (escritura): {out}", flush=True)
+
 def concat_with_xfade(clips, durations, out_path):
     """Encadena clips con transiciones xfade suaves."""
     if len(clips) == 1:
@@ -246,9 +324,13 @@ try:
     order = list(range(len(MOVEMENTS)))
     random.shuffle(order)
     clips = []
-    for i, (img, dur) in enumerate(zip(images, durations)):
+    for i, (sc, img, dur) in enumerate(zip(scenes, images, durations)):
         out = f"{workdir}/c{i+1}.mp4"
-        image_to_clip(img, out, dur, order[i % len(order)])
+        if (sc.get('tipo') or '').lower() == 'escritura':
+            escritura_texts[img] = sc.get('text', '')
+            escritura_clip(img, out, dur)
+        else:
+            image_to_clip(img, out, dur, order[i % len(order)])
         clips.append(out)
 
     print("=== Concatenando con xfade ===")
@@ -259,6 +341,9 @@ try:
     srt_path = f"{workdir}/subs.srt"
     entries = []; idx = 1; cursor = 0.0
     for sc, dur in zip(scenes, durations):
+        if (sc.get('tipo') or '').lower() == 'escritura':
+            cursor += dur - XFADE_DUR
+            continue
         sentences = split_sentences(sc.get('text', '')) or [sc.get('text', '')]
         total_c = sum(len(s) for s in sentences) or 1
         c2 = cursor
