@@ -27,16 +27,15 @@ XFADE_DUR = 0.6
 # crop=1280:720:X:Y donde X in [0,256] y Y in [0,144].
 # Expresiones usan 't' (tiempo en segundos) -- soportado en TODAS las versiones de ffmpeg.
 # MOVIMIENTOS: (desc, x_start, x_end, y_start, y_end)
-# Interpolacion lineal de crop offset en 1536x864 -> 1280x720
-# x rango: 0..256 (1536-1280), y rango: 0..144 (864-720)
+# Rango total: x=0..256, y=0..144. Ahora con recorrido completo = mucho más dinámico.
 MOVEMENTS = [
-    ("paneo dcha",    0,   220,  72,  72),   # paneo izq->dcha
-    ("paneo izq",   220,     0,  72,  72),   # paneo dcha->izq
-    ("centro fijo", 128,   128,  72,  72),   # sin paneo, zoom visual
-    ("paneo abajo",  72,    72,   0, 120),   # paneo arriba->abajo
-    ("paneo arriba", 72,    72, 120,   0),   # paneo abajo->arriba
-    ("diagonal",      0,   200,   0, 120),   # esquina TL -> BR
-    ("diag inv",    200,     0, 120,   0),   # esquina BR -> TL
+    ("paneo dcha rapido",   0,  256,  72,  72),
+    ("paneo izq rapido",  256,    0,  72,  72),
+    ("paneo abajo",        72,   72,   0, 144),
+    ("paneo arriba",       72,   72, 144,   0),
+    ("diagonal TL-BR",      0,  256,   0, 144),
+    ("diagonal BR-TL",    256,    0, 144,   0),
+    ("zoom center",       128,   64,  72,  36),
 ]
 
 def is_valid_image(path):
@@ -99,7 +98,7 @@ def image_to_clip(inp, out, dur, movement_idx):
     desc, x_start, x_end, y_start, y_end = mv
 
     # Dividir la escena en N segmentos de ~0.5s cada uno con offsets interpolados
-    SEG_DUR = 0.5
+    SEG_DUR = 0.2
     n_segs = max(1, int(dur / SEG_DUR))
     seg_dur = dur / n_segs
 
@@ -281,13 +280,20 @@ try:
     )
 
     print("=== Render final ===")
+    # Construir el comando segun si hay audio o no
     cmd = ['ffmpeg', '-y', '-i', base_path]
-    if has_audio: cmd += ['-i', audio]
-    cmd += ['-vf', f"subtitles={srt_path}:force_style='{sub_style}'", '-map', '0:v']
-    if has_audio: cmd += ['-map', '1:a']
+    if has_audio:
+        cmd += ['-i', audio]
+    # Subtitulos via -vf (funciona porque srt_path no tiene caracteres especiales)
+    sub_vf = f"subtitles='{srt_path}':force_style='{sub_style}'"
+    cmd += ['-vf', sub_vf, '-map', '0:v']
+    if has_audio:
+        cmd += ['-map', '1:a', '-c:a', 'aac', '-b:a', '128k']
     cmd += ['-c:v', 'libx264', '-preset', 'fast', '-crf', '22']
-    if has_audio: cmd += ['-c:a', 'aac', '-b:a', '128k', '-shortest']
+    if has_audio:
+        cmd += ['-shortest']
     cmd.append(f"{workdir}/final.mp4")
+    print(f"  Cmd render: {' '.join(cmd[:8])}...", flush=True)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
