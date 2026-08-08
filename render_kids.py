@@ -22,15 +22,18 @@ XFADE_DUR = 0.6
 # Todos usan escala 1.2x (1536x864) y recortan a 1280x720 moviéndose
 # El crop offset maximo: x=256 (1536-1280), y=144 (864-720)
 # crop=w:h:x:y donde x,y son expresiones de tiempo
+# (desc, crop_x_expr_ffmpeg, crop_y_expr_ffmpeg)
+# Escala siempre a 1536x864 (1.2x de 1280x720).
+# crop=1280:720:X:Y donde X in [0,256] y Y in [0,144].
+# Expresiones usan 't' (tiempo en segundos) -- soportado en TODAS las versiones de ffmpeg.
 MOVEMENTS = [
-    # (desc, scale, crop_x_expr, crop_y_expr)
-    ("zoom-in paneo dcha",   "1536:864", f"min(256,t*8)",                    "72"),
-    ("zoom-in paneo izq",    "1536:864", f"max(0,256-t*8)",                  "72"),
-    ("zoom-in centro fijo",  "1536:864", "128",                               "72"),
-    ("zoom-in paneo abajo",  "1536:864", "128",                               f"min(144,t*6)"),
-    ("zoom-in paneo arriba", "1536:864", "128",                               f"max(0,144-t*6)"),
-    ("zoom-in diagonal",     "1536:864", f"min(256,t*7)",                    f"min(144,t*5)"),
-    ("zoom-in diag inv",     "1536:864", f"max(0,256-t*7)",                  f"max(0,144-t*5)"),
+    ("paneo dcha",   "min(256,t*10)",          "72"),
+    ("paneo izq",    "max(0,256-t*10)",         "72"),
+    ("centro fijo",  "128",                        "72"),
+    ("paneo abajo",  "128",                        "min(144,t*8)"),
+    ("paneo arriba", "128",                        "max(0,144-t*8)"),
+    ("diagonal",     "min(256,t*9)",             "min(144,t*6)"),
+    ("diag inv",     "max(0,256-t*9)",           "max(0,144-t*6)"),
 ]
 
 def is_valid_image(path):
@@ -86,15 +89,12 @@ def get_audio_duration(path):
     return dur
 
 def image_to_clip(inp, out, dur, movement_idx):
-    """Imagen → clip con movimiento de camara via scale+crop animado.
-    No usa zoompan — 100% compatible con todas las versiones de FFmpeg."""
+    """Imagen -> clip con movimiento via scale+crop animado (sin zoompan)."""
     mv = MOVEMENTS[movement_idx % len(MOVEMENTS)]
-    desc, scale, cx_expr, cy_expr = mv
-    sw, sh = scale.split(':')
-
+    desc, cx_expr, cy_expr = mv
+    # escalar a 1536x864 (1.2x de 1280x720), luego crop animado
     vf = (
-        f"scale={sw}:{sh}:force_original_aspect_ratio=increase,"
-        f"crop={sw}:{sh},"          # asegurar dimensiones exactas post-scale
+        f"scale=1536:864:force_original_aspect_ratio=increase,crop=1536:864,"
         f"crop={W}:{H}:{cx_expr}:{cy_expr},"
         "format=yuv420p"
     )
