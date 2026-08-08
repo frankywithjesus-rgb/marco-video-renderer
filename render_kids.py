@@ -26,14 +26,16 @@ XFADE_DUR = 0.6
 # Escala siempre a 1536x864 (1.2x de 1280x720).
 # crop=1280:720:X:Y donde X in [0,256] y Y in [0,144].
 # Expresiones usan 't' (tiempo en segundos) -- soportado en TODAS las versiones de ffmpeg.
+# MOVIMIENTOS: expresiones sin comas (FFmpeg trata comas como separador de filtros en -vf).
+# min(A,B) => if(gte(A,B),B,A)  | max(A,B) => if(lte(A,B),B,A)
 MOVEMENTS = [
-    ("paneo dcha",   "min(256,t*10)",          "72"),
-    ("paneo izq",    "max(0,256-t*10)",         "72"),
-    ("centro fijo",  "128",                        "72"),
-    ("paneo abajo",  "128",                        "min(144,t*8)"),
-    ("paneo arriba", "128",                        "max(0,144-t*8)"),
-    ("diagonal",     "min(256,t*9)",             "min(144,t*6)"),
-    ("diag inv",     "max(0,256-t*9)",           "max(0,144-t*6)"),
+    ("paneo dcha",   "if(gte(t*10,256),256,t*10)",           "72"),
+    ("paneo izq",    "if(lte(256-t*10,0),0,256-t*10)",       "72"),
+    ("centro fijo",  "128",                                    "72"),
+    ("paneo abajo",  "128",                                    "if(gte(t*8,144),144,t*8)"),
+    ("paneo arriba", "128",                                    "if(lte(144-t*8,0),0,144-t*8)"),
+    ("diagonal",     "if(gte(t*9,256),256,t*9)",              "if(gte(t*6,144),144,t*6)"),
+    ("diag inv",     "if(lte(256-t*9,0),0,256-t*9)",         "if(lte(144-t*6,0),0,144-t*6)"),
 ]
 
 def is_valid_image(path):
