@@ -1,4 +1,4 @@
-import json, os, subprocess, requests, tempfile, sys, traceback, time, re
+import json, os, subprocess, requests, tempfile, sys, traceback, time, re, random
 
 payload = json.loads(os.environ['PAYLOAD'])
 callback_url = os.environ['CALLBACK_URL']
@@ -8,12 +8,33 @@ github_token = os.environ.get('GH_TOKEN', '')
 release_id = os.environ.get('RELEASE_ID', '367237403')
 repo = os.environ.get('REPO', 'frankywithjesus-rgb/marco-video-renderer')
 
-scenes = payload['scenes']  # [{image, text}, ...] en orden
+scenes = payload['scenes']  # [{image, text, tipo?, overlay?}, ...] en orden
 audio_url = payload.get('audioUrl', '')
 titulo = payload.get('titulo', 'Escuela Sabática Kids')
 
 workdir = tempfile.mkdtemp()
 FALLBACK = "https://images.pexels.com/photos/1367192/pexels-photo-1367192.jpeg"
+
+# ---------------------------------------------------------------------------
+# NUEVO: transiciones variadas entre escenas (xfade) y tipo de escena "escritura"
+# ---------------------------------------------------------------------------
+FPS = 20
+TRANSITION_DUR = 0.5  # segundos de crossfade entre escenas
+
+# Rotación de transiciones. "fade" es el comodín seguro; el resto le dan variedad.
+TRANSITION_POOL = ['fade', 'wipeleft', 'wiperight', 'circleopen', 'slideup', 'dissolve', 'smoothleft']
+
+def pick_transition(idx, sc_from, sc_to):
+    """Elige transición según contenido cuando hay pistas, si no rota por índice."""
+    to_tipo = (sc_to.get('tipo') or '').lower()
+    to_text = (sc_to.get('text') or '').lower()
+    if to_tipo == 'escritura':
+        return 'circleopen'  # entrar a un momento de "escritura" se siente como revelar algo
+    if any(k in to_text for k in ['corinto', 'jerusalén', 'jerusalen', 'belén', 'belen', 'calvario', 'cruz']):
+        return 'wipeleft'  # cambio de lugar -> sensación de viaje
+    if 'amor' in to_text or 'corazón' in to_text or 'corazon' in to_text:
+        return 'dissolve'
+    return TRANSITION_POOL[idx % len(TRANSITION_POOL)]
 
 def is_valid_image(path):
     try:
@@ -78,20 +99,38 @@ def get_audio_duration(path):
     print(f"Duracion del audio: {dur:.1f}s")
     return dur
 
-def image_to_kenburns(inp, out, dur, zoom_in=True):
+def image_to_kenburns(inp, out, dur, mode='zoom_in'):
     # Resolucion de trabajo reducida (720p) y fps mas bajo: zoompan es MUY pesado
     # por-frame en CPU, y a 1080p/30fps con escenas largas (~20-25s) se pasaba
     # del limite de 25 min del job. 1280x720@20fps recorta el trabajo total a
     # menos de la mitad manteniendo buena calidad percibida en YouTube/redes.
-    fps = 20
+    fps = FPS
     frames = max(1, int(dur * fps))
-    zexpr = "zoom+0.0012" if zoom_in else "if(lte(zoom,1.0),1.25,zoom-0.0012)"
+    # NUEVO: más variedad de movimiento en vez de solo zoom in/out centrado.
+    # Se rota entre zoom in, zoom out, y paneos diagonales sutiles para que no
+    # todas las escenas se sientan iguales.
+    if mode == 'zoom_in':
+        zexpr = "zoom+0.0012"
+        xexpr = "iw/2-(iw/zoom/2)"
+        yexpr = "ih/2-(ih/zoom/2)"
+    elif mode == 'zoom_out':
+        zexpr = "if(lte(zoom,1.0),1.25,zoom-0.0012)"
+        xexpr = "iw/2-(iw/zoom/2)"
+        yexpr = "ih/2-(ih/zoom/2)"
+    elif mode == 'pan_right':
+        zexpr = "1.15"
+        xexpr = "(iw-iw/zoom)*(on/{frames})".format(frames=frames)
+        yexpr = "ih/2-(ih/zoom/2)"
+    else:  # 'pan_left'
+        zexpr = "1.15"
+        xexpr = "(iw-iw/zoom)*(1-on/{frames})".format(frames=frames)
+        yexpr = "ih/2-(ih/zoom/2)"
     vf = (
         "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,"
-        f"zoompan=z='{zexpr}':d={frames}:s=1280x720:fps={fps},"
+        f"zoompan=z='{zexpr}':x='{xexpr}':y='{yexpr}':d={frames}:s=1280x720:fps={fps},"
         "format=yuv420p"
     )
-    print(f"  Ken Burns: {dur:.1f}s, {frames} frames @ {fps}fps, zoom_in={zoom_in}", flush=True)
+    print(f"  Ken Burns ({mode}): {dur:.1f}s, {frames} frames @ {fps}fps", flush=True)
     try:
         result = subprocess.run([
             'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp, '-t', str(dur),
@@ -101,6 +140,86 @@ def image_to_kenburns(inp, out, dur, zoom_in=True):
         raise Exception(f"FFmpeg Ken Burns colgado mas de 300s en {inp} (dur={dur:.1f}s, {frames} frames)")
     if result.returncode != 0:
         raise Exception(f"FFmpeg Ken Burns error: {result.stderr[-300:]}")
+    print(f"  -> listo: {out}", flush=True)
+
+def _wrap_words(words, max_chars_per_line=38):
+    """Distribuye palabras en líneas (para el efecto de escritura), devuelve
+    lista de (word, line_index, col_index_en_esa_linea)."""
+    layout = []
+    line_idx = 0
+    line_len = 0
+    for w in words:
+        wlen = len(w) + 1
+        if line_len + wlen > max_chars_per_line and line_len > 0:
+            line_idx += 1
+            line_len = 0
+        layout.append((w, line_idx))
+        line_len += wlen
+    return layout
+
+def escritura_clip(inp, out, dur, text):
+    """NUEVO: en vez de Ken Burns normal, anima el texto apareciendo palabra
+    por palabra sobre la imagen (mano escribiendo / pergamino), tipo
+    máquina de escribir, sincronizado con la duración de la escena."""
+    fps = FPS
+    words = [w for w in re.split(r'\s+', text.strip()) if w]
+    if not words:
+        words = ['...']
+    layout = _wrap_words(words, max_chars_per_line=38)
+    n_lines = layout[-1][1] + 1
+    per_word = dur / max(len(words), 1)
+
+    font_size = 34
+    line_height = 46
+    top_margin = 720 - (n_lines * line_height) - 60  # bloque de texto pegado abajo
+
+    # Ligero zoom lento de fondo para que la imagen no se sienta congelada
+    frames = max(1, int(dur * fps))
+    base_vf = (
+        "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,"
+        f"zoompan=z='min(zoom+0.0006,1.08)':d={frames}:s=1280x720:fps={fps},"
+        "format=yuv420p[bg]"
+    )
+
+    filters = [base_vf]
+    last = 'bg'
+    # Se agrupan las palabras por línea para calcular una x aproximada
+    # (fuente monoespaciada asumida ~19px por caracter a font_size=34).
+    char_w = 19
+    line_texts = {}
+    for w, li in layout:
+        line_texts.setdefault(li, []).append(w)
+
+    t_cursor = 0.0
+    line_progress = {li: [] for li in range(n_lines)}
+    for i, (w, li) in enumerate(layout):
+        reveal_t = round(i * per_word, 2)
+        line_progress[li].append(w)
+        rendered = ' '.join(line_progress[li])
+        safe_text = rendered.replace(':', '\\:').replace("'", "\u2019")
+        x_pos = 640 - (len(line_texts[li]) * char_w) // 2  # centrado aprox por línea
+        y_pos = top_margin + li * line_height
+        node = f"t{i}"
+        filters.append(
+            f"[{last}]drawtext=text='{safe_text}':fontcolor=white:fontsize={font_size}:"
+            f"box=1:boxcolor=black@0.45:boxborderw=10:x={x_pos}:y={y_pos}:"
+            f"enable='gte(t,{reveal_t})'[{node}]"
+        )
+        last = node
+
+    filter_complex = ';'.join(filters)
+    cmd = [
+        'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp, '-t', str(dur),
+        '-filter_complex', filter_complex, '-map', f'[{last}]',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-an', out
+    ]
+    print(f"  Escritura: {dur:.1f}s, {len(words)} palabras, {n_lines} lineas", flush=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise Exception(f"FFmpeg escritura colgado mas de 300s en {inp}")
+    if result.returncode != 0:
+        raise Exception(f"FFmpeg escritura error: {result.stderr[-500:]}")
     print(f"  -> listo: {out}", flush=True)
 
 def upload_to_github_release(path, token):
@@ -178,16 +297,59 @@ try:
                 print(f"  No se pudo preparar overlay de escena {i+1}: {e}", flush=True)
         cursor += dur
 
-    print("=== Animando escenas con efecto Ken Burns ===")
-    for i, (img, dur) in enumerate(zip(images, durations)):
-        image_to_kenburns(img, f"{workdir}/c{i+1}.mp4", dur, zoom_in=(i % 2 == 0))
+    # -----------------------------------------------------------------------
+    # NUEVO: extender la duración de cada clip para compensar el solape que
+    # va a "comerse" el xfade entre escenas, así el timing de audio/subtítulos
+    # (calculado sobre `durations` original) casi no se desincroniza.
+    # -----------------------------------------------------------------------
+    n = len(scenes)
+    extended = list(durations)
+    for i in range(n):
+        pad = 0.0
+        if i > 0:
+            pad += TRANSITION_DUR / 2
+        if i < n - 1:
+            pad += TRANSITION_DUR / 2
+        extended[i] = durations[i] + pad
 
-    print("=== Concatenando ===")
-    with open(f"{workdir}/list.txt", 'w') as f:
-        for i in range(1, len(scenes) + 1):
-            f.write(f"file '{workdir}/c{i}.mp4'\n")
-    subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', f"{workdir}/list.txt", '-c', 'copy', f"{workdir}/base.mp4"], check=True, capture_output=True, timeout=120)
-    print("  -> concatenado listo", flush=True)
+    print("=== Animando escenas (Ken Burns variado / escritura) ===")
+    modes = ['zoom_in', 'pan_right', 'zoom_out', 'pan_left']
+    for i, (sc, img, dur) in enumerate(zip(scenes, images, extended)):
+        out_clip = f"{workdir}/c{i+1}.mp4"
+        if (sc.get('tipo') or '').lower() == 'escritura':
+            escritura_clip(img, out_clip, dur, sc.get('text', ''))
+        else:
+            image_to_kenburns(img, out_clip, dur, mode=modes[i % len(modes)])
+
+    print("=== Uniendo escenas con transiciones (xfade) ===")
+    if n == 1:
+        subprocess.run(['ffmpeg', '-y', '-i', f"{workdir}/c1.mp4", '-c', 'copy', f"{workdir}/base.mp4"], check=True, capture_output=True, timeout=120)
+    else:
+        cmd = ['ffmpeg', '-y']
+        for i in range(1, n + 1):
+            cmd += ['-i', f"{workdir}/c{i}.mp4"]
+        filters = []
+        last_label = '0:v'
+        chain_dur = extended[0]
+        for i in range(1, n):
+            trans = pick_transition(i - 1, scenes[i - 1], scenes[i])
+            offset = round(chain_dur - TRANSITION_DUR, 2)
+            out_label = f"x{i}"
+            filters.append(
+                f"[{last_label}][{i}:v]xfade=transition={trans}:duration={TRANSITION_DUR}:offset={offset}[{out_label}]"
+            )
+            chain_dur = chain_dur + extended[i] - TRANSITION_DUR
+            last_label = out_label
+        filter_complex = ';'.join(filters)
+        cmd += ['-filter_complex', filter_complex, '-map', f'[{last_label}]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-an', f"{workdir}/base.mp4"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise Exception("FFmpeg xfade colgado mas de 300s")
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg xfade error: {result.stderr[-500:]}")
+    print("  -> union con transiciones lista", flush=True)
 
     print("=== Generando subtitulos por escena ===")
     srt_path = f"{workdir}/subs.srt"
