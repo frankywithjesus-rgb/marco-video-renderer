@@ -19,18 +19,25 @@ W, H = 1280, 720
 XFADE_DUR = 0.5  # segundos de transición entre escenas
 
 # Movimientos disponibles — alternan por escena para dar variedad
-# Expresiones zoompan validadas. Regla: x debe estar en [0, iw-iw/zoom],
-# y debe estar en [0, ih-ih/zoom]. Usamos max(0,min(...)) para seguridad.
-# El paneo usa 'n' (numero de frame actual) multiplicado por un delta pequeno.
+# Movimientos: escalamos a 2x, hacemos zoompan SOLO con zoom (sin paneo ahi),
+# luego un crop animado con expresion de tiempo 't' para el paneo lateral/vertical.
+# Este enfoque funciona en cualquier version de FFmpeg incluyendo la de ubuntu-latest.
+# Formato: (zoom_expr_zoompan, crop_x_expr, crop_y_expr, descripcion)
 MOVEMENTS = [
-    # vf completo por movimiento (mas simple que expresiones separadas)
-    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
-    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='max(0,iw/2-(iw/zoom/2)-n*0.4)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
-    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='min(iw-iw/zoom,iw/2-(iw/zoom/2)+n*0.4)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
-    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.001':x='iw/2-(iw/zoom/2)':y='max(0,ih/2-(ih/zoom/2)-n*0.3)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
-    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='if(lte(zoom,1.0),1.18,zoom-0.001)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
-    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='if(lte(zoom,1.0),1.18,zoom-0.001)':x='max(0,iw/2-(iw/zoom/2)-n*0.4)':y='max(0,ih/2-(ih/zoom/2)-n*0.3)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
-    "scale={W2}:{H2}:force_original_aspect_ratio=increase,crop={W2}:{H2},zoompan=z='zoom+0.0008':x='min(iw-iw/zoom,n*0.5)':y='min(ih-ih/zoom,n*0.3)':d={frames}:s={W}x{H}:fps={fps},format=yuv420p",
+    # zoom-in suave, paneo derecha
+    ("zoom+0.0008", "{cx}+t*2",                    "{cy}",              "zoom-in paneo dcha"),
+    # zoom-in suave, paneo izquierda
+    ("zoom+0.0008", "max(0,{cx}-t*2)",              "{cy}",              "zoom-in paneo izq"),
+    # zoom-in suave, sin paneo
+    ("zoom+0.0008", "{cx}",                         "{cy}",              "zoom-in centro"),
+    # zoom-in suave, paneo abajo
+    ("zoom+0.0008", "{cx}",                         "min({cy2},t*1.5)",  "zoom-in paneo abajo"),
+    # zoom-out suave, sin paneo
+    ("if(lte(zoom,1.0),1.15,zoom-0.0008)", "{cx}", "{cy}",              "zoom-out centro"),
+    # zoom-out suave, paneo diagonal
+    ("if(lte(zoom,1.0),1.15,zoom-0.0008)", "max(0,{cx}-t*1.5)", "max(0,{cy}-t*1)", "zoom-out diagonal"),
+    # zoom muy lento, paneo vertical
+    ("zoom+0.0004", "{cx}",                         "max(0,{cy}-t*1)",   "zoom micro paneo arriba"),
 ]
 
 def is_valid_image(path):
@@ -86,11 +93,37 @@ def get_audio_duration(path):
     return dur
 
 def image_to_clip(inp, out, dur, movement_idx):
-    """Convierte una imagen en un clip con movimiento de camara variado."""
+    """Convierte una imagen en un clip con movimiento de camara variado.
+    Estrategia: escalar a 2x, zoompan solo-zoom (sin paneo en zoompan para
+    compatibilidad con todas las versiones de FFmpeg), luego crop animado
+    con 't' para el paneo lateral/vertical."""
     frames = max(1, int(dur * FPS))
-    vf_template = MOVEMENTS[movement_idx % len(MOVEMENTS)]
-    vf = vf_template.format(W=W, H=H, W2=W*2, H2=H*2, fps=FPS, frames=frames)
-    print(f"  Clip {movement_idx+1}: {dur:.1f}s, {frames}f, mov={movement_idx % len(MOVEMENTS)}", flush=True)
+    mv = MOVEMENTS[movement_idx % len(MOVEMENTS)]
+    zoom_expr, cx_expr, cy_expr, desc = mv
+
+    # Centro de referencia del crop (el resto del frame 2x despues del zoom)
+    # W2/H2 = 2560/1440, crop destino = W/H = 1280/720
+    # El offset maximo de crop en x = W2 - W = 1280, en y = H2 - H = 720
+    cx = (W * 2 - W) // 2  # = 640
+    cy = (H * 2 - H) // 2  # = 360
+    cx2 = W * 2 - W         # = 1280 (max x para crop)
+    cy2 = H * 2 - H         # = 720  (max y para crop)
+
+    cx_resolved = cx_expr.replace("{cx}", str(cx)).replace("{cy}", str(cy)).replace("{cx2}", str(cx2)).replace("{cy2}", str(cy2))
+    cy_resolved = cy_expr.replace("{cx}", str(cx)).replace("{cy}", str(cy)).replace("{cx2}", str(cx2)).replace("{cy2}", str(cy2))
+
+    # clip x/y del crop deben estar en [0, max] -- wrapeamos con min/max de ffmpeg
+    cx_safe = f"min({cx2},max(0,{cx_resolved}))"
+    cy_safe = f"min({cy2},max(0,{cy_resolved}))"
+
+    vf = (
+        f"scale={W*2}:{H*2}:force_original_aspect_ratio=increase,crop={W*2}:{H*2},"
+        f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        f":d={frames}:s={W*2}x{H*2}:fps={FPS},"
+        f"crop={W}:{H}:{cx_safe}:{cy_safe},"
+        "format=yuv420p"
+    )
+    print(f"  Clip mov={movement_idx % len(MOVEMENTS)} ({desc}): {dur:.1f}s {frames}f", flush=True)
     try:
         result = subprocess.run([
             'ffmpeg', '-y', '-f', 'image2', '-loop', '1', '-i', inp,
