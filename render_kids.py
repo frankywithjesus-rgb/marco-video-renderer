@@ -91,28 +91,39 @@ def get_audio_duration(path):
     return dur
 
 def image_to_clip(inp, out, dur, movement_idx):
-    """Imagen -> clip con movimiento via scale+crop animado (sin zoompan)."""
+    """Imagen -> clip con movimiento via scale + crop animado.
+    Usa filter_complex en vez de -vf para evitar el parsing ambiguo de
+    parentesis y comas que FFmpeg hace en cadenas de -vf."""
     mv = MOVEMENTS[movement_idx % len(MOVEMENTS)]
     desc, cx_expr, cy_expr = mv
-    # escalar a 1536x864 (1.2x de 1280x720), luego crop animado
-    vf = (
-        f"scale=1536:864:force_original_aspect_ratio=increase,crop=1536:864,"
-        f"crop={W}:{H}:{cx_expr}:{cy_expr},"
-        "format=yuv420p"
-    )
-    print(f"  Clip mov={movement_idx % len(MOVEMENTS)} ({desc}): {dur:.1f}s", flush=True)
+    frames = max(1, int(dur * FPS))
+    tmp = out + '.tmp.mp4'
+
+    # Paso 1: imagen -> video estatico escalado a 1536x864
+    r1 = subprocess.run([
+        'ffmpeg', '-y',
+        '-f', 'image2', '-loop', '1', '-framerate', str(FPS), '-i', inp,
+        '-t', str(dur),
+        '-vf', 'scale=1536:864:force_original_aspect_ratio=increase,crop=1536:864,format=yuv420p',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-r', str(FPS), '-an', tmp
+    ], capture_output=True, text=True, timeout=300)
+    if r1.returncode != 0:
+        raise Exception(f"FFmpeg scale error: {r1.stderr[-400:]}")
+
+    # Paso 2: crop animado via filter_complex (las expresiones no se parsean como filtros)
+    fc = f"[0:v]crop={W}:{H}:{cx_expr}:{cy_expr},format=yuv420p[v]"
+    r2 = subprocess.run([
+        'ffmpeg', '-y', '-i', tmp,
+        '-filter_complex', fc,
+        '-map', '[v]',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25', '-r', str(FPS), '-an', out
+    ], capture_output=True, text=True, timeout=300)
     try:
-        result = subprocess.run([
-            'ffmpeg', '-y',
-            '-f', 'image2', '-loop', '1', '-framerate', str(FPS), '-i', inp,
-            '-t', str(dur), '-vf', vf,
-            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '25',
-            '-r', str(FPS), '-an', out
-        ], capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        raise Exception(f"FFmpeg clip colgado en {inp} ({dur:.1f}s)")
-    if result.returncode != 0:
-        raise Exception(f"FFmpeg clip error: {result.stderr[-500:]}")
+        os.remove(tmp)
+    except Exception:
+        pass
+    if r2.returncode != 0:
+        raise Exception(f"FFmpeg crop error: {r2.stderr[-400:]}")
     print(f"  -> listo: {out}", flush=True)
 
 def concat_with_xfade(clips, durations, out_path):
