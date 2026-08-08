@@ -156,6 +156,28 @@ try:
     durations = [total_duration * c / total_chars for c in char_counts]
     print(f"Duracion total: {total_duration:.1f}s repartida en {len(scenes)} escenas: {[round(d,1) for d in durations]}")
 
+    print("=== Preparando overlays (iconos de amor / lugares) ===")
+    OVERLAY_DURATION = 2.5
+    overlay_events = []  # [{start, end, path}]
+    cursor = 0.0
+    for i, (sc, dur) in enumerate(zip(scenes, durations)):
+        ov = sc.get('overlay')
+        if ov and ov.get('image'):
+            frac = max(0.0, min(1.0, ov.get('charFraction', 0.5)))
+            center = cursor + frac * dur
+            start = max(cursor, center - OVERLAY_DURATION / 2)
+            end = min(cursor + dur, start + OVERLAY_DURATION)
+            if end - start < 0.5:
+                cursor += dur
+                continue
+            try:
+                ov_path = download(ov['image'], f"{workdir}/ov{i+1}")
+                overlay_events.append({'start': start, 'end': end, 'path': ov_path, 'label': ov.get('label', '')})
+                print(f"  Overlay '{ov.get('label')}' en {start:.1f}s-{end:.1f}s", flush=True)
+            except Exception as e:
+                print(f"  No se pudo preparar overlay de escena {i+1}: {e}", flush=True)
+        cursor += dur
+
     print("=== Animando escenas con efecto Ken Burns ===")
     for i, (img, dur) in enumerate(zip(images, durations)):
         image_to_kenburns(img, f"{workdir}/c{i+1}.mp4", dur, zoom_in=(i % 2 == 0))
@@ -192,26 +214,48 @@ try:
         for idx, start, end, s in entries:
             srt.write(f"{idx}\n{format_time(start)} --> {format_time(end)}\n{s}\n\n")
 
-    vf = (
-        f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=26,"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
-        "Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=40'"
+    sub_style = (
+        "FontName=Arial,FontSize=26,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+        "BackColour=&H80000000,Bold=1,Outline=2,Shadow=1,Alignment=2,MarginV=40"
     )
 
+    # Construir el comando: base de video + audio + N imagenes de overlay como inputs extra
     cmd = ['ffmpeg', '-y', '-i', f"{workdir}/base.mp4"]
     if has_audio:
         cmd += ['-i', audio]
-    cmd += ['-vf', vf, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
+    for ev in overlay_events:
+        cmd += ['-loop', '1', '-t', str(round(ev['end'] - ev['start'] + 0.2, 2)), '-i', ev['path']]
+
+    # filter_complex: subtitulos sobre la base, luego cada overlay encadenado con su ventana de tiempo
+    filters = [f"[0:v]subtitles={srt_path}:force_style='{sub_style}'[v0]"]
+    last_label = 'v0'
+    audio_input_count = 1 if has_audio else 0
+    for i, ev in enumerate(overlay_events):
+        input_idx = 1 + audio_input_count + i  # despues de base(0) y audio(si existe)
+        scaled = f"ov{i}"
+        out_label = f"v{i+1}"
+        filters.append(f"[{input_idx}:v]scale=220:220,format=rgba,fade=in:st=0:d=0.3:alpha=1,fade=out:st={round(ev['end']-ev['start']-0.3,2)}:d=0.3:alpha=1[{scaled}]")
+        filters.append(
+            f"[{last_label}][{scaled}]overlay=W-w-40:H-h-40:"
+            f"enable='between(t,{round(ev['start'],2)},{round(ev['end'],2)})'[{out_label}]"
+        )
+        last_label = out_label
+
+    filter_complex = ';'.join(filters)
+    cmd += ['-filter_complex', filter_complex, '-map', f'[{last_label}]']
     if has_audio:
-        cmd += ['-c:a', 'aac', '-b:a', '128k', '-map', '0:v', '-map', '1:a', '-shortest']
+        cmd += ['-map', '1:a']
+    cmd += ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
+    if has_audio:
+        cmd += ['-c:a', 'aac', '-b:a', '128k', '-shortest']
     cmd.append(f"{workdir}/final.mp4")
-    print("  Renderizando video final con subtitulos...", flush=True)
+    print(f"  Renderizando video final con subtitulos + {len(overlay_events)} overlays...", flush=True)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         raise Exception("FFmpeg render final colgado mas de 300s")
     if result.returncode != 0:
-        raise Exception(f"FFmpeg render error: {result.stderr[-400:]}")
+        raise Exception(f"FFmpeg render error: {result.stderr[-500:]}")
     print("  -> render final listo", flush=True)
 
     final_path = f"{workdir}/final.mp4"
