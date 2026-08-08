@@ -173,10 +173,17 @@ def escritura_clip(inp, out, dur, text):
     line_height = 46
     top_margin = 720 - (n_lines * line_height) - 60  # bloque de texto pegado abajo
 
-    # Ligero zoom lento de fondo para que la imagen no se sienta congelada
+    # Ligero zoom lento de fondo para que la imagen no se sienta congelada.
+    # FIX (encontrado probando con imagenes reales): antes usaba
+    # scale...increase + crop=1280:720, igual que Ken Burns normal, y eso
+    # cortaba contenido pegado arriba/abajo de la imagen cuadrada de Gemini
+    # (el mismo bug de recorte documentado originalmente, aplicado aca a la
+    # imagen de fondo de "mano escribiendo"). Se cambia a decrease + pad para
+    # mostrar la imagen completa con barras, sin recortar nada importante.
     frames = max(1, int(dur * fps))
     base_vf = (
-        "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,"
+        "scale=1280:720:force_original_aspect_ratio=decrease,"
+        "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,"
         f"zoompan=z='min(zoom+0.0006,1.08)':d={frames}:s=1280x720:fps={fps},"
         "format=yuv420p[bg]"
     )
@@ -359,6 +366,14 @@ try:
     for sc, dur in zip(scenes, durations):
         seg_start = cursor
         seg_end = cursor + dur
+        # FIX (encontrado probando con video real): las escenas tipo
+        # "escritura" ya muestran el texto en pantalla via el efecto
+        # typewriter. Si ademas se les monta el subtitulo SRT global, las
+        # dos capas de texto quedan una encima de la otra e ilegibles.
+        # Se excluyen del SRT -- el texto ya está visible por otro camino.
+        if (sc.get('tipo') or '').lower() == 'escritura':
+            cursor = seg_end
+            continue
         sentences = split_sentences(sc.get('text', '')) or [sc.get('text', '')]
         total_chars_seg = sum(len(s) for s in sentences) or 1
         c2 = seg_start
