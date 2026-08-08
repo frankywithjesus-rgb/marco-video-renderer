@@ -31,6 +31,6 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: "367237403"
+          RELEASE_ID: "367301584"
           REPO: "frankywithjesus-rgb/marco-video-renderer"
         run: python3 render_kids.py
