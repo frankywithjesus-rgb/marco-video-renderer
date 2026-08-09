@@ -192,15 +192,10 @@ def concat_with_xfade(clips, durations, out_path):
 def upload_to_github_release(path, token):
     print("=== Subiendo video a GitHub Release ===")
     headers = {"Authorization": f"token {token}"}
-    assets = requests.get(
-        f"https://api.github.com/repos/{repo}/releases/{release_id}/assets",
-        headers=headers).json()
-    for asset in assets:
-        requests.delete(
-            f"https://api.github.com/repos/{repo}/releases/assets/{asset['id']}",
-            headers=headers)
-        print(f"  Borrado: {asset['name']}")
-    filename = f"episodio_{int(time.time())}.mp4"
+    # Nombre unico basado en titulo + timestamp para identificar cada episodio
+    safe_title = re.sub(r'[^a-zA-Z0-9_-]', '_', titulo)[:40]
+    filename = f"{safe_title}_{int(time.time())}.mp4"
+    # NO borramos assets anteriores -- cada episodio queda guardado
     with open(path, 'rb') as f:
         r = requests.post(
             f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={filename}",
@@ -210,6 +205,18 @@ def upload_to_github_release(path, token):
     if r.status_code in (200, 201) and 'browser_download_url' in data:
         print(f"URL: {data['browser_download_url']}")
         return data['browser_download_url']
+    # Si ya existe un asset con ese nombre, intentar con timestamp diferente
+    if r.status_code == 422:
+        filename2 = f"{safe_title}_{int(time.time())+1}.mp4"
+        with open(path, 'rb') as f:
+            r2 = requests.post(
+                f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={filename2}",
+                headers={**headers, "Content-Type": "video/mp4"},
+                data=f, timeout=300)
+        data2 = r2.json()
+        if r2.status_code in (200, 201) and 'browser_download_url' in data2:
+            print(f"URL: {data2['browser_download_url']}")
+            return data2['browser_download_url']
     raise Exception(f"GitHub Release error: {r.status_code} {data}")
 
 def format_time(secs):
